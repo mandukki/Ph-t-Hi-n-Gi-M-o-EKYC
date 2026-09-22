@@ -12,7 +12,7 @@ Không dùng Deep Learning nặng.
 | 11243952 | Bạch Quốc Khánh | Dữ liệu thật, tiền xử lý |
 | 11243974 | Trịnh Mai Linh | Dữ liệu giả |
 | 11243985 | Trần Đức Mạnh  | Đặc trưng LBP, GLCM |
-| TV5 | <tên> | Đặc trưng FFT, mô hình, đánh giá |
+| 11243991 | Vũ Bình Minh | Đặc trưng FFT, mô hình, đánh giá |
 
 ## Cấu trúc thư mục
 
