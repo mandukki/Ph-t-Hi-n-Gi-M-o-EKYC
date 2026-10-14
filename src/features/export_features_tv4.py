@@ -24,31 +24,51 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from src.preprocessing.align import preprocess_card
-from src.preprocessing.roi_extractor import extract_rois
+try:
+    from src.preprocess.align import preprocess_card
+    from src.preprocess.roi_extractor import extract_rois
+except ImportError:
+    from src.preprocessing.align import preprocess_card
+    from src.preprocessing.roi_extractor import extract_rois
+
 from src.features.lbp_extractor import extract_lbp
 from src.features.glcm_extractor import extract_glcm
+
 
 
 def export_features_and_analyze(data_dir="./data"):
     print("[*] Đang thực hiện các nhiệm vụ của TV4 (Đặc trưng kết cấu)...")
     
-    raw_path = Path(data_dir) / "raw"
-    tampered_path = Path(data_dir) / "tampered"
+    real_path = Path(data_dir) / "real"
+    if not real_path.exists() or len(list(real_path.glob("*.*"))) <= 1:
+        real_path = Path(data_dir) / "raw"
+
+    fake_path = Path(data_dir) / "fake"
+    if not fake_path.exists() or len(list(fake_path.glob("*.*"))) <= 1:
+        fake_path = Path(data_dir) / "tampered"
+
+    print(f"[*] Nguồn ảnh thật: {real_path}")
+    print(f"[*] Nguồn ảnh giả:  {fake_path}")
 
     lbp_rows = []
     glcm_rows = []
     analysis_records = []
 
-    # 1. Quét ảnh thật (Real)
-    for f in sorted(raw_path.glob("*.png")):
+    exts = ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp"]
+
+    # 1. Quét ảnh thật (Real từ Khánh - TV2)
+    real_files = []
+    for ext in exts:
+        real_files.extend(list(real_path.glob(ext)))
+    real_files = sorted(set(real_files))
+
+    print(f"[*] Đang trích xuất đặc trưng {len(real_files)} ảnh thật...")
+    for f in real_files:
         img = cv2.imread(str(f))
         if img is None:
             continue
         aligned, gray = preprocess_card(img)
-        rois = extract_rois(gray)
 
-        # Trích xuất LBP & GLCM cho toàn thẻ và từng ROI
         lbp_vec = extract_lbp(gray)
         glcm_vec = extract_glcm(gray)
 
@@ -71,24 +91,29 @@ def export_features_and_analyze(data_dir="./data"):
         })
 
     # 2. Quét ảnh giả (Tampered)
-    for f in sorted(tampered_path.glob("*.png")):
+    fake_files = []
+    for ext in exts:
+        fake_files.extend(list(fake_path.glob(ext)))
+    fake_files = sorted(set(fake_files))
+
+    print(f"[*] Đang trích xuất đặc trưng {len(fake_files)} ảnh giả mạo...")
+    for f in fake_files:
         img = cv2.imread(str(f))
         if img is None:
             continue
         aligned, gray = preprocess_card(img)
-        rois = extract_rois(gray)
 
-        # Xác định loại can thiệp từ tên file
-        if "splicing" in f.name:
+        fname_lower = f.name.lower()
+        if "splic" in fname_lower or "replace_photo" in fname_lower:
             atk_type = "Splicing"
-        elif "font_tampering" in f.name:
+        elif "font" in fname_lower or "edit_text" in fname_lower:
             atk_type = "Font Tampering"
-        elif "blur" in f.name:
+        elif "blur" in fname_lower or "erasing" in fname_lower:
             atk_type = "Blur/Inpainting"
-        elif "recapture" in f.name:
+        elif "recap" in fname_lower or "reprint" in fname_lower:
             atk_type = "Recapture"
         else:
-            atk_type = "Unknown"
+            atk_type = "Tampered_General"
 
         lbp_vec = extract_lbp(gray)
         glcm_vec = extract_glcm(gray)
@@ -111,15 +136,17 @@ def export_features_and_analyze(data_dir="./data"):
             "lbp_entropy": lbp_vec[-1]
         })
 
-    # Lưu T13: data/features_lbp.csv
+    # Lưu T13: CSV & XLSX cho LBP
     df_lbp = pd.DataFrame(lbp_rows)
     df_lbp.to_csv(Path(data_dir) / "features_lbp.csv", index=False)
-    print(f"[+] [T13 Hoàn thành] Đã xuất file đặc trưng LBP: {data_dir}/features_lbp.csv ({len(df_lbp)} mẫu)")
+    df_lbp.to_excel(Path(data_dir) / "features_lbp.xlsx", index=False)
+    print(f"[+] [T13 Hoàn thành] Đã xuất file LBP: {data_dir}/features_lbp.csv & features_lbp.xlsx ({len(df_lbp)} mẫu)")
 
-    # Lưu T17: data/features_glcm.csv
+    # Lưu T17: CSV & XLSX cho GLCM
     df_glcm = pd.DataFrame(glcm_rows)
     df_glcm.to_csv(Path(data_dir) / "features_glcm.csv", index=False)
-    print(f"[+] [T17 Hoàn thành] Đã xuất file đặc trưng GLCM: {data_dir}/features_glcm.csv ({len(df_glcm)} mẫu)")
+    df_glcm.to_excel(Path(data_dir) / "features_glcm.xlsx", index=False)
+    print(f"[+] [T17 Hoàn thành] Đã xuất file GLCM: {data_dir}/features_glcm.csv & features_glcm.xlsx ({len(df_glcm)} mẫu)")
 
     # Lưu T24: Bảng phân tích theo từng loại giả mạo
     df_analysis = pd.DataFrame(analysis_records)
@@ -129,24 +156,27 @@ def export_features_and_analyze(data_dir="./data"):
         "lbp_entropy": ["mean", "std"]
     }).reset_index()
     summary_by_type.columns = ["Attack_Type", "Contrast_Mean", "Contrast_Std", "Homogeneity_Mean", "Homogeneity_Std", "LBP_Entropy_Mean", "LBP_Entropy_Std"]
-    summary_csv = Path("paper/tables/tampering_by_type.csv")
+    
+    summary_csv = Path("report/tables/tampering_by_type.csv")
+    summary_csv.parent.mkdir(parents=True, exist_ok=True)
     summary_by_type.to_csv(summary_csv, index=False)
     print(f"[+] [T24 Hoàn thành] Đã xuất bảng phân tích theo loại giả mạo: {summary_csv}")
 
     # Vẽ biểu đồ phân tích T24
     plt.figure(figsize=(10, 5))
     plt.subplot(1, 2, 1)
-    sns.boxplot(data=df_analysis, x="type", y="homogeneity", palette="Set2")
+    sns.boxplot(data=df_analysis, x="type", y="homogeneity", hue="type", palette="Set2", legend=False)
     plt.xticks(rotation=25)
     plt.title("GLCM Homogeneity across Attack Types")
 
     plt.subplot(1, 2, 2)
-    sns.boxplot(data=df_analysis, x="type", y="lbp_entropy", palette="Set2")
+    sns.boxplot(data=df_analysis, x="type", y="lbp_entropy", hue="type", palette="Set2", legend=False)
     plt.xticks(rotation=25)
     plt.title("LBP Entropy across Attack Types")
 
     plt.tight_layout()
-    chart_path = Path("paper/figures/tampering_type_analysis.png")
+    chart_path = Path("report/figures/tampering_type_analysis.png")
+    chart_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(chart_path, dpi=300)
     plt.close()
     print(f"[+] [T24 Hoàn thành] Đã vẽ biểu đồ phân tích đặc trưng: {chart_path}")
@@ -154,3 +184,4 @@ def export_features_and_analyze(data_dir="./data"):
 
 if __name__ == "__main__":
     export_features_and_analyze()
+
