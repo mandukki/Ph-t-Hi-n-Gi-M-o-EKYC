@@ -219,7 +219,16 @@ __marimo__/
 data/real/*
 data/fake/*
 data/processed/*
+data/raw/*
+data/tampered/*
+data/masks/*
 !data/**/.gitkeep
 *.npy
 *.pkl
+scratch/
+sheet.xlsx
+docs/
+paper/
+demo/
+
 
