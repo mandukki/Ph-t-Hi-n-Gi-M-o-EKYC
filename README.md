@@ -39,13 +39,14 @@ Tuyệt đối không dùng giấy tờ thật của người thật.
 
 **Ảnh chuẩn hóa:** kích thước 856x540, ảnh xám (grayscale).
 
-**Nhãn:** file `data/labels.csv` gồm 3 cột:
+**Nhãn:** file `data/labels.csv` gồm 4 cột:
 
 | Cột | Giá trị |
 |---|---|
-| `path` | Đường dẫn tới ảnh |
+| `path` | Đường dẫn tương đối tới ảnh (tính từ thư mục gốc dự án) |
 | `label` | `real` hoặc `fake` |
 | `fraud_type` | `none`, `replace_photo`, `edit_text`, `splice`, `reprint` |
+| `group_id` | ID nhóm ảnh gốc — ảnh gốc và mọi bản giả tạo từ nó phải cùng group_id để chống rò rỉ dữ liệu khi chia train/test |
 
 **Giao diện hàm:** mỗi hàm nhận một ảnh xám dạng numpy array, trả về một vector đặc trưng 1 chiều.
 
@@ -74,7 +75,13 @@ pip install numpy opencv-python scikit-image scikit-learn matplotlib pandas
 
 ## Cách chạy
 
-Sẽ bổ sung khi pipeline hoàn thiện (Tuần 4–5).
+```bash
+# Bước 1: Trích xuất đặc trưng từ tập ảnh
+python scripts/build_features.py
+
+# Bước 2: Huấn luyện và đánh giá mô hình
+python scripts/run_training.py --model svm
+```
 
 ## Tiến độ
 
