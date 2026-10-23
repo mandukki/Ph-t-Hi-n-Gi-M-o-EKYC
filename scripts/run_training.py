@@ -25,9 +25,10 @@ from sklearn.model_selection import GroupShuffleSplit
 from src.models.train import (
     cross_validate_grouped,
     split_dataset_by_group,
-    train_and_evaluate_pipeline,
 )
+from src.models.classifier import TextureFraudClassifier
 from src.models.evaluation import (
+    calc_eer,
     plot_fraud_type_report,
     print_fraud_type_report,
 )
@@ -130,25 +131,40 @@ def main() -> None:
     print(f"  F1-Score : {cv_results['mean_f1_score']:.4f} "
           f"\u00b1 {cv_results['std_f1_score']:.4f}")
 
-    # ── Huấn luyện trên toàn bộ train, đánh giá trên test ───────────────
+    # ── Huấn luyện trên toàn bộ train, calibrate threshold, đánh giá trên test ──
     print(f"\n=== Huấn luyện mô hình {args.model.upper()} và đánh giá trên tập test ===")
     save_path = str(ROOT_DIR / args.save_model) if args.save_model else None
-    classifier, test_metrics = train_and_evaluate_pipeline(
-        x_train, y_train, x_test, y_test,
-        model_type=model_type,
-        save_path=save_path,
+
+    classifier = TextureFraudClassifier(model_type=model_type)
+    classifier.fit(x_train, y_train)
+
+    # Xác định ngưỡng phân loại tối ưu (EER threshold) từ tập TRAIN (chống rò rỉ dữ liệu)
+    train_scores = classifier.predict_proba(x_train)
+    _, train_eer_thresh = calc_eer(y_train, train_scores)
+    classifier.threshold = float(train_eer_thresh)
+
+    # Đánh giá trên tập TEST bằng ngưỡng đã xác định từ tập TRAIN
+    test_metrics = classifier.evaluate(
+        x_test,
+        y_test,
+        threshold=classifier.threshold,
+        update_best_threshold=False,
     )
 
+    if save_path:
+        saved_file = classifier.save(save_path)
+        test_metrics["saved_model_path"] = saved_file
+
     print(f"\nKết quả đánh giá trên tập test:")
-    print(f"  Accuracy      : {test_metrics['accuracy']:.4f}")
-    print(f"  AUC-ROC       : {test_metrics['auc_roc']:.4f}")
-    print(f"  EER           : {test_metrics['eer']:.4f}")
-    print(f"  EER Threshold : {test_metrics['eer_threshold']:.4f}")
-    print(f"  Eval Threshold: {test_metrics['eval_threshold']:.4f}")
-    print(f"  Precision     : {test_metrics['precision']:.4f}")
-    print(f"  Recall        : {test_metrics['recall']:.4f}")
-    print(f"  F1-Score      : {test_metrics['f1_score']:.4f}")
-    print(f"  Confusion Mat : {test_metrics['confusion_matrix']}")
+    print(f"  Accuracy       : {test_metrics['accuracy']:.4f}")
+    print(f"  AUC-ROC        : {test_metrics['auc_roc']:.4f}")
+    print(f"  EER (Test)     : {test_metrics['eer']:.4f}")
+    print(f"  EER Thresh(Test: {test_metrics['eer_threshold']:.4f}")
+    print(f"  Eval Threshold : {test_metrics['eval_threshold']:.4f} (calibrated từ train set)")
+    print(f"  Precision      : {test_metrics['precision']:.4f}")
+    print(f"  Recall         : {test_metrics['recall']:.4f}")
+    print(f"  F1-Score       : {test_metrics['f1_score']:.4f}")
+    print(f"  Confusion Mat  : {test_metrics['confusion_matrix']}")
 
     if save_path:
         print(f"\n  Mô hình đã lưu tại: "
@@ -157,7 +173,10 @@ def main() -> None:
     # ── Đánh giá theo từng fraud_type ────────────────────────────────────
     print(f"\n=== Đánh giá theo từng loại can thiệp (fraud_type) ===")
     fraud_report = classifier.evaluate_fraud_types(
-        x_test, y_test, fraud_types=fraud_types_test,
+        x_test,
+        y_test,
+        fraud_types=fraud_types_test,
+        threshold=classifier.threshold,
     )
     print_fraud_type_report(fraud_report)
 

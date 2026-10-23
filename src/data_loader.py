@@ -46,6 +46,9 @@ def load_labels(csv_path: str) -> pd.DataFrame:
             f"Các cột hiện có: {list(df.columns)}"
         )
 
+    if df.empty:
+        raise ValueError(f"File labels.csv không có dữ liệu (rỗng): {csv_path}")
+
     return df
 
 
@@ -87,8 +90,13 @@ def build_dataset(
     for idx, row in df.iterrows():
         img_path = project_root / row["path"]
 
-        # Đọc ảnh bằng OpenCV
-        img = cv2.imread(str(img_path))
+        # Đọc ảnh (hỗ trợ cả đường dẫn tiếng Việt có dấu trên Windows)
+        try:
+            raw_bytes = np.fromfile(str(img_path), dtype=np.uint8)
+            img = cv2.imdecode(raw_bytes, cv2.IMREAD_COLOR)
+        except Exception:
+            img = None
+
         if img is None:
             print(f"[CẢNH BÁO] Không đọc được ảnh ({idx + 1}/{total}): {img_path}")
             failed_paths.append(str(row["path"]))
@@ -101,8 +109,19 @@ def build_dataset(
             # Trích xuất đặc trưng
             feature_vector = extract_all_features(processed)
 
-            # Chuyển nhãn: real → 0, fake → 1
-            label = 1 if str(row["label"]).strip().lower() == "fake" else 0
+            # Chuyển nhãn: real → 0, fake → 1 (kiểm tra chặt chẽ nhãn)
+            raw_label = str(row["label"]).strip().lower()
+            if raw_label == "fake":
+                label = 1
+            elif raw_label == "real":
+                label = 0
+            else:
+                print(
+                    f"[CẢNH BÁO] Bỏ qua ảnh ({idx + 1}/{total}): nhãn '{row['label']}' "
+                    f"không hợp lệ (chỉ chấp nhận 'real' hoặc 'fake'): {img_path}"
+                )
+                failed_paths.append(str(row["path"]))
+                continue
 
             features_list.append(feature_vector)
             labels_list.append(label)

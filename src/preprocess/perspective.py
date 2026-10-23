@@ -7,6 +7,7 @@ chuyển đổi ảnh xám, và chuẩn hóa kích thước.
 """
 
 from typing import Optional, Tuple
+import warnings
 
 import cv2
 import numpy as np
@@ -123,13 +124,20 @@ def auto_crop_card(image: np.ndarray) -> Optional[np.ndarray]:
 
     # Sắp xếp contours theo diện tích giảm dần
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    img_area = float(gray.shape[0] * gray.shape[1])
 
-    # Kiểm tra 5 contour lớn nhất, tìm tứ giác đầu tiên
+    # Kiểm tra 5 contour lớn nhất, tìm tứ giác hợp lệ đầu tiên
     for contour in contours[:5]:
+        area = cv2.contourArea(contour)
+        # Thẻ CCCD phải chiếm ít nhất 10% diện tích khung hình để loại trừ nhiễu nhỏ
+        if area < 0.10 * img_area:
+            continue
+
         peri = cv2.arcLength(contour, True)
         approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
 
-        if len(approx) == 4:
+        # Kiểm tra là tứ giác lồi (convex quadrilateral)
+        if len(approx) == 4 and cv2.isContourConvex(approx):
             pts = approx.reshape(4, 2).astype(np.float32)
             return four_point_transform(image, pts)
 
@@ -165,7 +173,15 @@ def resize_to_standard(
     Trả về:
         Ảnh đã resize (numpy array) với kích thước width × height.
     """
-    return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+    h, w = image.shape[:2]
+    target_w, target_h = size
+    # Dùng INTER_AREA cho downscaling (chống aliasing), INTER_LINEAR cho upscaling
+    interpolation = (
+        cv2.INTER_AREA
+        if (w >= target_w and h >= target_h)
+        else cv2.INTER_LINEAR
+    )
+    return cv2.resize(image, size, interpolation=interpolation)
 
 
 def preprocess_image(
@@ -179,7 +195,7 @@ def preprocess_image(
     1. Cắt vùng thẻ:
        - Nếu có corners: dùng four_point_transform.
        - Nếu không: thử auto_crop_card.
-       - Nếu auto_crop_card thất bại: dùng nguyên ảnh gốc.
+       - Nếu auto_crop_card thất bại: cảnh báo và dùng nguyên ảnh gốc.
     2. Chuyển sang ảnh xám (grayscale).
     3. Resize về kích thước chuẩn (856×540).
 
@@ -197,7 +213,15 @@ def preprocess_image(
         result = four_point_transform(image, corners)
     else:
         cropped = auto_crop_card(image)
-        result = cropped if cropped is not None else image
+        if cropped is not None:
+            result = cropped
+        else:
+            warnings.warn(
+                "auto_crop_card không tìm được viền thẻ tứ giác hợp lệ, dùng nguyên ảnh gốc.",
+                UserWarning,
+                stacklevel=2,
+            )
+            result = image
 
     # Bước 2: Chuyển xám
     result = to_grayscale(result)

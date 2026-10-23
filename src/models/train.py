@@ -2,6 +2,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
+import traceback
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Đảm bảo thư mục gốc dự án nằm trong sys.path khi chạy file trực tiếp
@@ -14,6 +15,7 @@ from sklearn.model_selection import (
     GridSearchCV,
     GroupKFold,
     GroupShuffleSplit,
+    StratifiedGroupKFold,
     StratifiedKFold,
 )
 
@@ -24,6 +26,7 @@ from src.models.classifier import (
     save_model,
 )
 from src.models.evaluation import (
+    calc_eer,
     evaluate_all,
     plot_fraud_type_report,
     print_fraud_type_report,
@@ -72,8 +75,12 @@ def cross_validate_grouped(
     if groups is not None:
         groups = np.asarray(groups)
         unique_groups = len(np.unique(groups))
-        splits = min(n_splits, unique_groups)
-        cv = GroupKFold(n_splits=splits)
+        if unique_groups < 2:
+            raise ValueError(
+                f"Cần ít nhất 2 group để cross-validate, hiện chỉ có {unique_groups} group."
+            )
+        splits = max(2, min(n_splits, unique_groups))
+        cv = StratifiedGroupKFold(n_splits=splits, shuffle=True, random_state=random_state)
         split_generator = cv.split(x, y, groups=groups)
     else:
         cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
@@ -85,11 +92,35 @@ def cross_validate_grouped(
         x_tr, x_val = x[train_idx], x[val_idx]
         y_tr, y_val = y[train_idx], y[val_idx]
 
-        clf = TextureFraudClassifier(model_type=model_type, **model_kwargs)
-        clf.fit(x_tr, y_tr)
+        # Kiểm tra fold có đủ cả 2 lớp real (0) và fake (1) ở cả train lẫn val không
+        if len(np.unique(y_tr)) < 2 or len(np.unique(y_val)) < 2:
+            print(
+                f"[CẢNH BÁO] Bỏ qua fold {fold_idx + 1}: tập train hoặc val chỉ có 1 lớp duy nhất."
+            )
+            continue
 
-        fold_metrics = clf.evaluate(x_val, y_val, update_best_threshold=False)
-        metrics_list.append(fold_metrics)
+        try:
+            clf = TextureFraudClassifier(model_type=model_type, **model_kwargs)
+            clf.fit(x_tr, y_tr)
+
+            # Tính ngưỡng EER từ tập train của fold (chống rò rỉ dữ liệu)
+            train_scores = clf.predict_proba(x_tr)
+            _, train_eer_thresh = calc_eer(y_tr, train_scores)
+            clf.threshold = float(train_eer_thresh)
+
+            fold_metrics = clf.evaluate(
+                x_val, y_val, threshold=clf.threshold, update_best_threshold=False
+            )
+            metrics_list.append(fold_metrics)
+        except Exception as e:
+            print(f"[CẢNH BÁO] Lỗi khi huấn luyện fold {fold_idx + 1}: {e}")
+            traceback.print_exc()
+            continue
+
+    if len(metrics_list) == 0:
+        raise RuntimeError(
+            "Không có fold nào huấn luyện thành công để tính chỉ số cross-validation."
+        )
 
     keys = ["accuracy", "auc_roc", "eer", "precision", "recall", "f1_score"]
     summary: Dict[str, Any] = {"folds": len(metrics_list), "raw_fold_metrics": metrics_list}
