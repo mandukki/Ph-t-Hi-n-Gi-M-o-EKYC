@@ -1,0 +1,9 @@
+path,label,fraud_type,group_id
+data/real/card_01.jpg,real,none,group_01
+data/fake/card_01_fake_reprint.jpg,fake,reprint,group_01
+data/fake/card_01_fake_photo.jpg,fake,replace_photo,group_01
+data/fake/card_01_fake_text.jpg,fake,edit_text,group_01
+data/real/card_02.jpg,real,none,group_02
+data/fake/card_02_fake_reprint.jpg,fake,reprint,group_02
+data/fake/card_02_fake_splice.jpg,fake,splice,group_02
+data/fake/card_02_fake_photo.jpg,fake,replace_photo,group_02

@@ -1,7 +1,7 @@
 # Phát hiện gian lận giấy tờ cá nhân (eKYC) bằng Texture Analysis
 
 Đề tài 7, môn Xử lý ảnh. Phân tích kết cấu bề mặt (LBP, GLCM, FFT) trên CCCD/GCMT
-để phát hiện ảnh bị photoshop, in lại hoặc cắt ghép, và định vị vùng bị can thiệp.
+để phân loại ảnh thật / giả (REAL / FAKE) và đánh giá hiệu năng theo từng dạng can thiệp.
 Không dùng Deep Learning nặng.
 
 ## Thành viên

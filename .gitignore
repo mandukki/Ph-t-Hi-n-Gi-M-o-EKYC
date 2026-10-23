@@ -223,3 +223,7 @@ data/processed/*
 *.npy
 *.pkl
 
+
+data/_tmp_uploaded_zip/
+report/detailed_audit/
+
