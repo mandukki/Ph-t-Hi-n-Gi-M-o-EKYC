@@ -20,15 +20,14 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import numpy as np
-from sklearn.model_selection import GroupShuffleSplit
 
 from src.models.train import (
     cross_validate_grouped,
-    split_dataset_by_group,
+    estimate_eer_threshold_oof,
+    split_indices_by_group,
 )
 from src.models.classifier import TextureFraudClassifier
 from src.models.evaluation import (
-    calc_eer,
     plot_fraud_type_report,
     print_fraud_type_report,
 )
@@ -85,11 +84,23 @@ def main() -> None:
 
     # ── Đọc dữ liệu đặc trưng ──────────────────────────────────────────
     print(f"=== Đọc dữ liệu đặc trưng từ: {features_path} ===")
-    data = np.load(features_path, allow_pickle=True)
-    X = data["X"]
-    y = data["y"]
-    groups = data["groups"]
-    fraud_types = data["fraud_types"]
+    try:
+        with np.load(features_path, allow_pickle=False) as data:
+            X = data["X"]
+            y = data["y"]
+            groups = data["groups"]
+            fraud_types = data["fraud_types"]
+    except ValueError as exc:
+        raise ValueError(
+            "File đặc trưng chứa mảng object cũ không thể nạp an toàn. "
+            "Hãy chạy lại scripts/build_features.py để tạo file mới."
+        ) from exc
+
+    if X.ndim != 2 or not (len(X) == len(y) == len(groups) == len(fraud_types)):
+        raise ValueError(
+            "File đặc trưng không hợp lệ: X phải là ma trận 2D và mọi mảng "
+            "phải có cùng số mẫu."
+        )
 
     print(f"  Số mẫu      : {X.shape[0]}")
     print(f"  Số đặc trưng: {X.shape[1]}")
@@ -98,14 +109,12 @@ def main() -> None:
 
     # ── Chia tập train/test theo group ───────────────────────────────────
     print(f"\n=== Chia tập train/test (test_size={args.test_size}) ===")
-    x_train, x_test, y_train, y_test, g_train, g_test = split_dataset_by_group(
-        X, y, groups, test_size=args.test_size,
+    train_idx, test_idx = split_indices_by_group(
+        X, y, groups, test_size=args.test_size
     )
-
-    # Lấy fraud_types cho tập test bằng cách tái tạo split indices
-    # (dùng cùng random_state=42 mặc định của split_dataset_by_group)
-    gss = GroupShuffleSplit(n_splits=1, test_size=args.test_size, random_state=42)
-    _, test_idx = next(gss.split(X, y, groups=groups))
+    x_train, x_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+    g_train, g_test = groups[train_idx], groups[test_idx]
     fraud_types_test = fraud_types[test_idx]
 
     print(f"  Train: {len(x_train)} mẫu ({len(np.unique(g_train))} nhóm)")
@@ -138,10 +147,14 @@ def main() -> None:
     classifier = TextureFraudClassifier(model_type=model_type)
     classifier.fit(x_train, y_train)
 
-    # Xác định ngưỡng phân loại tối ưu (EER threshold) từ tập TRAIN (chống rò rỉ dữ liệu)
-    train_scores = classifier.predict_proba(x_train)
-    _, train_eer_thresh = calc_eer(y_train, train_scores)
-    classifier.threshold = float(train_eer_thresh)
+    # Hiệu chuẩn ngưỡng từ dự đoán out-of-fold trong train, giữ group nguyên vẹn.
+    classifier.threshold = estimate_eer_threshold_oof(
+        x_train,
+        y_train,
+        groups=g_train,
+        model_type=model_type,
+        n_splits=args.cv_folds,
+    )
 
     # Đánh giá trên tập TEST bằng ngưỡng đã xác định từ tập TRAIN
     test_metrics = classifier.evaluate(

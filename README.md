@@ -30,7 +30,9 @@ Không dùng Deep Learning nặng.
 ## Dữ liệu
 
 Ảnh không được đưa lên GitHub (repo chặn bằng `.gitignore`).
-Tải dữ liệu tại: <link Google Drive của nhóm>
+Repo chỉ có file data/labels_sample.csv để minh họa; trước khi chạy pipeline, tạo
+data/labels.csv theo đúng cấu trúc đó và điền đường dẫn tới bộ ảnh được nhóm chia sẻ.
+Không đưa giấy tờ thật hoặc dữ liệu định danh lên GitHub.
 
 Lưu ý: chỉ dùng mẫu CCCD/GCMT công khai hoặc minh họa với thông tin bịa.
 Tuyệt đối không dùng giấy tờ thật của người thật.

@@ -137,7 +137,7 @@ def test_4_robustness_and_error_handling():
     tmp_dir = ROOT_DIR / "data" / "_tmp_verify"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     
-    # 1. Tạo 1 ảnh hợp lệ tiếng Việt có dấu
+    # 1. Tạo ảnh thật và ảnh giả riêng, cùng dùng tên file tiếng Việt có dấu.
     vn_img_name = "ảnh_thật_mẫu_01.png"
     vn_img_path = tmp_dir / vn_img_name
     dummy = np.random.randint(50, 200, (300, 400, 3), dtype=np.uint8)
@@ -145,25 +145,44 @@ def test_4_robustness_and_error_handling():
     is_success, buffer = cv2.imencode(".png", dummy)
     with open(vn_img_path, "wb") as f:
         f.write(buffer)
+
+    fake_img_name = "ảnh_giả_mẫu_01.png"
+    fake_img_path = tmp_dir / fake_img_name
+    fake_dummy = 255 - dummy
+    _, fake_buffer = cv2.imencode(".png", fake_dummy)
+    with open(fake_img_path, "wb") as f:
+        f.write(fake_buffer)
         
-    # 2. Tạo file labels.csv chứa cả dòng hợp lệ, dòng typo và đường dẫn không tồn tại
+    # 2. Tạo labels.csv hợp lệ có ảnh thiếu; dòng nhãn sai được kiểm tra riêng.
     test_csv = tmp_dir / "labels_test.csv"
     df = pd.DataFrame([
         {"path": f"data/_tmp_verify/{vn_img_name}", "label": "real", "fraud_type": "none", "group_id": "g1"},
-        {"path": f"data/_tmp_verify/{vn_img_name}", "label": "fake", "fraud_type": "replace_photo", "group_id": "g1"},
-        {"path": f"data/_tmp_verify/{vn_img_name}", "label": "typo_fak", "fraud_type": "none", "group_id": "g2"},  # Nhãn sai
+        {"path": f"data/_tmp_verify/{fake_img_name}", "label": "fake", "fraud_type": "replace_photo", "group_id": "g1"},
         {"path": "data/_tmp_verify/khong_ton_tai.png", "label": "real", "fraud_type": "none", "group_id": "g3"},     # Ảnh thiếu
     ])
     df.to_csv(test_csv, index=False)
+
+    invalid_csv = tmp_dir / "labels_invalid_test.csv"
+    pd.DataFrame([
+        {"path": f"data/_tmp_verify/{vn_img_name}", "label": "typo_fak", "fraud_type": "none", "group_id": "g2"},
+    ]).to_csv(invalid_csv, index=False)
+
+    try:
+        load_labels(str(invalid_csv))
+    except ValueError:
+        invalid_label_rejected = True
+    else:
+        invalid_label_rejected = False
+    assert invalid_label_rejected, "Nhãn sai phải bị từ chối trước khi đọc ảnh."
     
     print("  Đang nạp file dữ liệu có nhiễu (typo nhãn, ảnh thiếu, đường dẫn tiếng Việt)...")
     X, y, groups, fraud_types, failed = build_dataset(str(test_csv), str(ROOT_DIR))
     
     print(f"  - Số mẫu hợp lệ trích xuất thành công: {len(X)}")
-    print(f"  - Số mẫu lỗi được phát hiện và bỏ qua: {len(failed)}")
+    print(f"  - Số ảnh thiếu được phát hiện và bỏ qua: {len(failed)}")
     
     assert len(X) == 2, f"Mong đợi 2 mẫu hợp lệ, thực tế {len(X)}"
-    assert len(failed) == 2, f"Mong đợi 2 mẫu lỗi, thực tế {len(failed)}"
+    assert len(failed) == 1, f"Mong đợi 1 ảnh lỗi, thực tế {len(failed)}"
     assert set(y) == {0, 1}, "Nhãn phải bao gồm đúng {0, 1}"
     
     # Dọn dẹp
