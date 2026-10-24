@@ -49,6 +49,70 @@ def load_labels(csv_path: str) -> pd.DataFrame:
     if df.empty:
         raise ValueError(f"File labels.csv không có dữ liệu (rỗng): {csv_path}")
 
+    # Chuẩn hóa và kiểm tra metadata trước khi đọc ảnh/trích xuất đặc trưng.
+    for column in required_cols:
+        df[column] = df[column].astype("string").str.strip()
+
+    missing_values = {
+        column: int((df[column].isna() | (df[column] == "")).sum())
+        for column in required_cols
+    }
+    missing_values = {column: count for column, count in missing_values.items() if count}
+    if missing_values:
+        raise ValueError(
+            "File labels.csv có giá trị rỗng ở các cột bắt buộc: "
+            f"{missing_values}"
+        )
+
+    df["label"] = df["label"].str.lower()
+    df["fraud_type"] = df["fraud_type"].str.lower()
+
+    invalid_labels = sorted(set(df["label"]) - {"real", "fake"})
+    if invalid_labels:
+        raise ValueError(
+            f"Nhãn không hợp lệ trong labels.csv: {invalid_labels}; "
+            "chỉ chấp nhận 'real' hoặc 'fake'."
+        )
+
+    allowed_fraud_types = {"none", "replace_photo", "edit_text", "splice", "reprint"}
+    invalid_fraud_types = sorted(set(df["fraud_type"]) - allowed_fraud_types)
+    if invalid_fraud_types:
+        raise ValueError(
+            f"fraud_type không hợp lệ trong labels.csv: {invalid_fraud_types}; "
+            f"các giá trị hợp lệ: {sorted(allowed_fraud_types)}."
+        )
+
+    inconsistent_types = df.loc[
+        ((df["label"] == "real") & (df["fraud_type"] != "none"))
+        | ((df["label"] == "fake") & (df["fraud_type"] == "none")),
+        ["path", "label", "fraud_type"],
+    ]
+    if not inconsistent_types.empty:
+        raise ValueError(
+            "label và fraud_type không nhất quán trong labels.csv. "
+            "Ảnh real phải có fraud_type='none'; ảnh fake phải có loại can thiệp. "
+            f"Các dòng đầu tiên: {inconsistent_types.head(5).to_dict('records')}"
+        )
+
+    invalid_paths = [
+        path
+        for path in df["path"]
+        if Path(path).is_absolute() or ".." in Path(path).parts
+    ]
+    if invalid_paths:
+        raise ValueError(
+            "Cột path phải chứa đường dẫn tương đối nằm trong thư mục dự án; "
+            f"đường dẫn không hợp lệ: {invalid_paths[:5]}"
+        )
+
+    normalized_paths = df["path"].map(lambda path: Path(path).as_posix().casefold())
+    duplicate_paths = normalized_paths[normalized_paths.duplicated(keep=False)]
+    if not duplicate_paths.empty:
+        duplicates = sorted(set(df.loc[duplicate_paths.index, "path"].tolist()))
+        raise ValueError(
+            f"Một ảnh xuất hiện nhiều lần trong labels.csv: {duplicates[:10]}"
+        )
+
     return df
 
 
@@ -78,7 +142,7 @@ def build_dataset(
         RuntimeError: Nếu không trích xuất được đặc trưng từ bất kỳ ảnh nào.
     """
     df = load_labels(csv_path)
-    project_root = Path(project_root)
+    project_root = Path(project_root).resolve()
 
     features_list: List[np.ndarray] = []
     labels_list: List[int] = []
@@ -88,7 +152,13 @@ def build_dataset(
 
     total = len(df)
     for idx, row in df.iterrows():
-        img_path = project_root / row["path"]
+        img_path = (project_root / row["path"]).resolve()
+        try:
+            img_path.relative_to(project_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"Đường dẫn ảnh nằm ngoài thư mục dự án: {row['path']}"
+            ) from exc
 
         # Đọc ảnh (hỗ trợ cả đường dẫn tiếng Việt có dấu trên Windows)
         try:
@@ -141,8 +211,9 @@ def build_dataset(
 
     X = np.array(features_list, dtype=np.float64)
     y = np.array(labels_list, dtype=int)
-    groups = np.array(groups_list, dtype=object)
-    fraud_types = np.array(fraud_types_list, dtype=object)
+    # Lưu chuỗi Unicode thay vì object để file .npz không cần pickle khi nạp.
+    groups = np.array(groups_list, dtype=str)
+    fraud_types = np.array(fraud_types_list, dtype=str)
 
     print(
         f"[INFO] Đã trích xuất đặc trưng thành công: "

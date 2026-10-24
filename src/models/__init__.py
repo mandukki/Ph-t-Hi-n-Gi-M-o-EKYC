@@ -22,6 +22,8 @@ __all__ = [
     "save_model",
     "load_model",
     "split_dataset_by_group",
+    "split_indices_by_group",
+    "estimate_eer_threshold_oof",
     "cross_validate_grouped",
     "tune_hyperparameters",
     "train_and_evaluate_pipeline",
@@ -38,6 +40,8 @@ __all__ = [
 def __getattr__(name: str):
     if name in (
         "split_dataset_by_group",
+        "split_indices_by_group",
+        "estimate_eer_threshold_oof",
         "cross_validate_grouped",
         "tune_hyperparameters",
         "train_and_evaluate_pipeline",
