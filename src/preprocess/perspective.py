@@ -90,10 +90,10 @@ def four_point_transform(image: np.ndarray, pts: np.ndarray) -> np.ndarray:
 
 
 def auto_crop_card(image: np.ndarray) -> Optional[np.ndarray]:
-    """Tự động tìm viền thẻ CCCD bằng Canny + findContours + approxPolyDP.
+    """Tự động tìm viền thẻ bằng Canny, rồi Otsu nếu cần.
 
-    Tìm tứ giác lớn nhất trong ảnh (giả định là viền thẻ CCCD), sau đó
-    cắt và duỗi thẳng vùng đó bằng four_point_transform.
+    Chỉ nhận contour lồi có diện tích và tỷ lệ gần với hình dạng thẻ. Ảnh lớn
+    được thu nhỏ để dò contour, rồi các góc được ánh xạ về đúng tọa độ ảnh gốc.
 
     Tham số:
         image: Ảnh đầu vào (numpy array, có thể màu hoặc xám).
@@ -102,44 +102,95 @@ def auto_crop_card(image: np.ndarray) -> Optional[np.ndarray]:
         Ảnh đã cắt viền thẻ (numpy array), hoặc None nếu không tìm được
         tứ giác phù hợp.
     """
-    # Chuyển sang ảnh xám nếu ảnh màu
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    h, w = image.shape[:2]
+    scale = min(1.0, 800.0 / max(h, w))
+    small_w = max(1, int(round(w * scale)))
+    small_h = max(1, int(round(h * scale)))
+
+    if (small_w, small_h) != (w, h):
+        small = cv2.resize(
+            image, (small_w, small_h), interpolation=cv2.INTER_AREA
+        )
     else:
-        gray = image.copy()
+        small = image
+
+    # Dùng tỷ lệ thực tế sau khi làm tròn kích thước, có thể khác nhau đôi chút
+    # giữa hai trục.
+    scale_x = small_w / float(w)
+    scale_y = small_h / float(h)
+
+    # Chuyển sang ảnh xám nếu ảnh màu
+    if len(small.shape) == 3:
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = small.copy()
 
     # Làm mờ để giảm nhiễu trước khi phát hiện cạnh
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    small_area = float(gray.size)
 
-    # Phát hiện cạnh bằng Canny
+    def find_card_corners(contours) -> Optional[np.ndarray]:
+        for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:10]:
+            area_ratio = cv2.contourArea(contour) / small_area
+            # Contour gần bằng cả khung thường là nền do phân ngưỡng Otsu.
+            if not 0.10 <= area_ratio < 0.95:
+                continue
+
+            perimeter = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
+            if len(approx) != 4 or not cv2.isContourConvex(approx):
+                continue
+
+            points = order_points(approx.reshape(4, 2))
+            top_left, top_right, bottom_right, bottom_left = points
+            width = (
+                np.linalg.norm(top_right - top_left)
+                + np.linalg.norm(bottom_right - bottom_left)
+            ) / 2.0
+            height = (
+                np.linalg.norm(bottom_left - top_left)
+                + np.linalg.norm(bottom_right - top_right)
+            ) / 2.0
+            if height <= 0:
+                continue
+
+            aspect_ratio = width / height
+            # Chấp nhận thẻ nằm ngang hoặc dọc, loại các contour nền quá dẹt.
+            if 0.5 <= aspect_ratio <= 2.0:
+                return points
+        return None
+
+    def warp_candidate(contours) -> Optional[np.ndarray]:
+        points = find_card_corners(contours)
+        if points is None:
+            return None
+        source_points = points.copy()
+        source_points[:, 0] /= scale_x
+        source_points[:, 1] /= scale_y
+        return four_point_transform(image, source_points)
+
+    # Chiến lược 1: Dò viền bằng Canny
     edges = cv2.Canny(blurred, 50, 150)
-
-    # Tìm contours
     contours, _ = cv2.findContours(
         edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
+    candidate = warp_candidate(contours)
+    if candidate is not None:
+        return candidate
 
-    if not contours:
-        return None
-
-    # Sắp xếp contours theo diện tích giảm dần
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-    img_area = float(gray.shape[0] * gray.shape[1])
-
-    # Kiểm tra 5 contour lớn nhất, tìm tứ giác hợp lệ đầu tiên
-    for contour in contours[:5]:
-        area = cv2.contourArea(contour)
-        # Thẻ CCCD phải chiếm ít nhất 10% diện tích khung hình để loại trừ nhiễu nhỏ
-        if area < 0.10 * img_area:
-            continue
-
-        peri = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
-
-        # Kiểm tra là tứ giác lồi (convex quadrilateral)
-        if len(approx) == 4 and cv2.isContourConvex(approx):
-            pts = approx.reshape(4, 2).astype(np.float32)
-            return four_point_transform(image, pts)
+    # Chiến lược 2: thử cả hai cực tính để xử lý thẻ tối trên nền sáng và ngược lại.
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    for polarity in (cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV):
+        _, thresh = cv2.threshold(
+            blurred, 0, 255, polarity | cv2.THRESH_OTSU
+        )
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(
+            closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        candidate = warp_candidate(contours)
+        if candidate is not None:
+            return candidate
 
     return None
 
