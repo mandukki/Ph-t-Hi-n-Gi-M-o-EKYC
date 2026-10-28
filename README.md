@@ -61,6 +61,10 @@ extract_fft(img)   # -> vector
 **Chống rò rỉ dữ liệu:** một ảnh gốc và các bản giả mạo tạo từ nó phải cùng nằm trong
 tập train hoặc cùng nằm trong tập test.
 
+Script tạo ảnh giả chỉ lấy ảnh donor trong cùng `group_id`. Nhãn `replace_photo`
+hiện mô phỏng dấu vết chỉnh sửa/ghép vùng chân dung; bộ này chưa mô phỏng đầy đủ
+việc tráo ảnh giữa hai danh tính độc lập.
+
 ## Cách làm việc với Git
 
 1. Không code trực tiếp trên nhánh `main`.
@@ -78,12 +82,23 @@ pip install numpy opencv-python scikit-image scikit-learn matplotlib pandas
 ## Cách chạy
 
 ```bash
-# Bước 1: Trích xuất đặc trưng từ tập ảnh
+# Sinh lại 90 mẫu can thiệp tổng hợp từ data/real
+python scripts/generate_fake_dataset.py
+
+# Chọn 30 ảnh reprint hợp lệ từ thư mục ảnh giả do nhóm cung cấp,
+# loại ảnh trùng byte với ảnh real và cập nhật data/labels.csv
+python scripts/organize_and_add_reprint.py
+
+# Trích xuất đặc trưng từ tập ảnh
 python scripts/build_features.py
 
-# Bước 2: Huấn luyện và đánh giá mô hình
-python scripts/run_training.py --model svm
+# Đánh giá SVM và Random Forest bằng leave-one-group-out,
+# tạo báo cáo, bảng CSV và biểu đồ trong report/evaluation/
+python scripts/run_grouped_evaluation.py --model all
 ```
+
+Kết quả đánh giá được lưu tại `report/evaluation/evaluation_summary.md`. Tập ảnh
+phải được cung cấp riêng vì dữ liệu ảnh không được commit lên Git.
 
 ## Tiến độ
 

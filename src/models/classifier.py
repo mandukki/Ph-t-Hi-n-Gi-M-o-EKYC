@@ -43,7 +43,7 @@ def build_rf_classifier(
     min_samples_leaf: int = 1,
     class_weight: Optional[str] = "balanced",
     random_state: int = 42,
-    n_jobs: int = -1,
+    n_jobs: int = 1,
 ) -> Pipeline:
     rf = RandomForestClassifier(
         n_estimators=n_estimators,

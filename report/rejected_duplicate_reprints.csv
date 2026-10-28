@@ -1,0 +1,5 @@
+source_path,duplicate_of,sha256,reason
+ảnh giả/IMG_E6867.JPG,data/real/card_03_08.jpg,b097f602f899d232228b3b9365f07edd7ff1b4b2fa2fbe1b95c37dbd88f285b0,Byte-identical to a real image; cannot be labeled reprint.
+ảnh giả/IMG_E6868.JPG,data/real/card_03_09.jpg,de985eff5e91b10ddff4152d82eaef8487f6fa95d13da6d0d9b16ee262d7134d,Byte-identical to a real image; cannot be labeled reprint.
+ảnh giả/IMG_E6871.JPG,data/real/card_03_10.jpg,d80802fe8b133c83d7b9b7ff9bdbb3a60975fd4f53bb56740d51392c3f94749c,Byte-identical to a real image; cannot be labeled reprint.
+ảnh giả/IMG_E6872.JPG,data/real/card_03_11.jpg,2326df390d2f0a3a29d284383ffc641f317136aa4cc00852ea6265c39b6b5917,Byte-identical to a real image; cannot be labeled reprint.

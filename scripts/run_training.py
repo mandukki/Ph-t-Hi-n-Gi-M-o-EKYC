@@ -74,8 +74,8 @@ def main() -> None:
     parser.add_argument(
         "--save_plot",
         type=str,
-        default="report/fraud_evaluation.png",
-        help="Đường dẫn tương đối lưu biểu đồ (mặc định: report/fraud_evaluation.png)",
+        default=None,
+        help="Đường dẫn tương đối lưu biểu đồ (mặc định: đường dẫn riêng theo model)",
     )
     args = parser.parse_args()
 
@@ -119,9 +119,14 @@ def main() -> None:
 
     print(f"  Train: {len(x_train)} mẫu ({len(np.unique(g_train))} nhóm)")
     print(f"  Test : {len(x_test)} mẫu ({len(np.unique(g_test))} nhóm)")
+    print(f"  Train groups: {', '.join(sorted(np.unique(g_train).tolist()))}")
+    print(f"  Test groups : {', '.join(sorted(np.unique(g_test).tolist()))}")
 
     # ── Cross-validation trên tập train ──────────────────────────────────
-    print(f"\n=== Cross-validation ({args.cv_folds}-fold, grouped) ===")
+    print(
+        f"\n=== Grouped cross-validation trên train "
+        f"(tối đa {args.cv_folds} fold) ==="
+    )
     cv_results = cross_validate_grouped(
         model_type=model_type,
         x=x_train,
@@ -194,9 +199,12 @@ def main() -> None:
     print_fraud_type_report(fraud_report)
 
     # ── Vẽ biểu đồ ──────────────────────────────────────────────────────
-    if args.save_plot:
-        plot_path = str(ROOT_DIR / args.save_plot)
-        plot_fraud_type_report(fraud_report, save_path=plot_path)
+    plot_path = (
+        ROOT_DIR / args.save_plot
+        if args.save_plot
+        else ROOT_DIR / "report" / "evaluation" / f"{args.model}_single_group_holdout.png"
+    )
+    plot_fraud_type_report(fraud_report, save_path=str(plot_path))
 
     print("\n[OK] Huấn luyện và đánh giá hoàn tất thành công.")
 
