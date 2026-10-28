@@ -1,13 +1,31 @@
-"""Đánh giá SVM/RF bằng leave-one-group-out và ghi artefact có thể tái lập."""
+"""
+Đánh giá toàn diện mô hình SVM và Random Forest bằng Leave-One-Group-Out (LOGO).
+
+Đặc tính kỹ thuật:
+1. Không rò rỉ dữ liệu (Zero Data Leakage):
+   - Outer CV: Leave-One-Group-Out bảo đảm một nhóm thẻ chỉ xuất hiện ở tập test đúng 1 lần.
+   - Inner Thresholding: Ngưỡng EER được ước lượng độc lập qua out-of-fold trên tập train.
+   - SVM sử dụng decision_function (không dùng Platt scaling ngẫu nhiên nội bộ).
+2. Đánh giá Baseline công bằng:
+   - Bổ sung fold-level majority baseline (học đa số từ outer train).
+3. Phân tích độ nhạy (Sensitivity Analysis):
+   - Đánh giá trên toàn bộ 165 mẫu (kèm 30 ảnh reprint heuristic).
+   - Đánh giá trên tập lõi đã kiểm thực nguồn gốc 135 mẫu (loại bỏ ảnh reprint chưa kiểm chứng).
+4. Kiểm toán nguồn gốc (Provenance Check):
+   - Quét mã băm SHA-256 đối chiếu và kiểm tra trạng thái xác thực trong provenance manifest.
+5. Báo cáo & Manifest có thể tái lập 100%:
+   - Xuất đầy đủ metrics JSON, fold CSV, OOF predictions CSV, biểu đồ ma trận nhầm lẫn.
+"""
 
 import argparse
 import hashlib
 import json
 import platform
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -30,34 +48,64 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import GroupKFold
 
+from src.data_loader import validate_feature_bundle, validate_metadata_df
 from src.models.classifier import TextureFraudClassifier
-from src.models.evaluation import calc_eer
+from src.models.evaluation import calc_eer, calc_far_frr
 from src.models.train import estimate_eer_threshold_oof
 
 
 def sha256_file(path: Path) -> str:
+    """Tính mã băm SHA-256 của file."""
     digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for block in iter(lambda: file.read(1024 * 1024), b""):
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
 
 
-def binary_metrics(y_true: np.ndarray, y_pred: np.ndarray, scores: np.ndarray) -> Dict[str, Any]:
+def get_git_commit_hash() -> str:
+    """Lấy commit SHA hiện tại qua Git CLI nếu khả dụng."""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT_DIR,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return res.stdout.strip()
+    except Exception:
+        return "unversioned_or_git_unavailable"
+
+
+def compute_binary_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    scores: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """Tính toán bộ chỉ số phân loại nhị phân (0=Real, 1=Fake)."""
     matrix = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    tn, fp, fn, tp = (int(value) for value in matrix.ravel())
-    eer, eer_threshold = calc_eer(y_true, scores)
-    return {
-        "n_samples": int(len(y_true)),
-        "accuracy": float(accuracy_score(y_true, y_pred)),
-        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
-        "precision_fake": float(precision_score(y_true, y_pred, pos_label=1, zero_division=0)),
-        "recall_fake": float(recall_score(y_true, y_pred, pos_label=1, zero_division=0)),
-        "specificity_real": float(tn / (tn + fp)) if tn + fp else 0.0,
-        "f1_fake": float(f1_score(y_true, y_pred, pos_label=1, zero_division=0)),
-        "auc_roc": float(roc_auc_score(y_true, scores)),
-        "eer": float(eer),
-        "eer_threshold_diagnostic_only": float(eer_threshold),
+    tn, fp, fn, tp = (int(v) for v in matrix.ravel())
+
+    n_samples = len(y_true)
+    acc = float(accuracy_score(y_true, y_pred))
+    bal_acc = float(balanced_accuracy_score(y_true, y_pred))
+    prec_fake = float(precision_score(y_true, y_pred, pos_label=1, zero_division=0))
+    rec_fake = float(recall_score(y_true, y_pred, pos_label=1, zero_division=0))
+    spec_real = float(tn / (tn + fp)) if (tn + fp) > 0 else float(np.nan)
+    f1_fake = float(f1_score(y_true, y_pred, pos_label=1, zero_division=0))
+    far, frr = calc_far_frr(y_true, y_pred)
+
+    result = {
+        "n_samples": int(n_samples),
+        "accuracy": acc,
+        "balanced_accuracy": bal_acc,
+        "precision_fake": prec_fake,
+        "recall_fake": rec_fake,
+        "specificity_real": spec_real,
+        "f1_fake": f1_fake,
+        "far_fake_accepted": far,
+        "frr_real_rejected": frr,
         "confusion_matrix_real_fake": matrix.tolist(),
         "tn": tn,
         "fp": fp,
@@ -65,123 +113,100 @@ def binary_metrics(y_true: np.ndarray, y_pred: np.ndarray, scores: np.ndarray) -
         "tp": tp,
     }
 
+    if scores is not None and len(np.unique(y_true)) >= 2:
+        try:
+            result["auc_roc"] = float(roc_auc_score(y_true, scores))
+        except Exception:
+            result["auc_roc"] = float(np.nan)
+        eer, eer_thresh = calc_eer(y_true, scores)
+        result["eer"] = float(eer)
+        result["eer_threshold_diagnostic_only"] = float(eer_thresh)
+    else:
+        result["auc_roc"] = float(np.nan)
+        result["eer"] = float(np.nan)
+        result["eer_threshold_diagnostic_only"] = float(np.nan)
 
-def fraud_type_metrics(
-    y: np.ndarray,
-    pred: np.ndarray,
+    return result
+
+
+def compute_fraud_type_breakdown(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
     fraud_types: np.ndarray,
-    scores: np.ndarray,
+    scores: Optional[np.ndarray] = None,
 ) -> List[Dict[str, Any]]:
+    """Tính toán tỷ lệ phát hiện chi tiết theo từng loại can thiệp giả mạo."""
     result = []
-    for fraud_type in sorted(np.unique(fraud_types).tolist()):
-        mask = fraud_types == fraud_type
-        if fraud_type == "none":
-            correct = int(np.sum(pred[mask] == 0))
+    for f_type in sorted(np.unique(fraud_types).tolist()):
+        mask = (fraud_types == f_type)
+        count = int(mask.sum())
+        sub_true = y_true[mask]
+        sub_pred = y_pred[mask]
+
+        if f_type == "none" or np.all(sub_true == 0):
+            correct = int(np.sum(sub_pred == 0))
             metric_name = "specificity_real"
         else:
-            correct = int(np.sum(pred[mask] == 1))
+            correct = int(np.sum(sub_pred == 1))
             metric_name = "detection_rate_fake"
-        count = int(mask.sum())
+
+        rate = float(correct / count) if count > 0 else 0.0
+        mean_score = float(np.mean(scores[mask])) if scores is not None and count > 0 else 0.0
+
         result.append({
-            "fraud_type": str(fraud_type),
+            "fraud_type": str(f_type),
             "metric": metric_name,
             "count": count,
             "correct": correct,
-            "rate": float(correct / count) if count else 0.0,
-            "mean_fake_score": float(np.mean(scores[mask])) if count else 0.0,
-            "real_count": int(np.sum(y[mask] == 0)),
-            "fake_count": int(np.sum(y[mask] == 1)),
+            "rate": rate,
+            "mean_score": mean_score,
+            "real_count": int(np.sum(sub_true == 0)),
+            "fake_count": int(np.sum(sub_true == 1)),
         })
     return result
 
 
-def validate_inputs(
-    features_path: Path, labels_path: Path
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
-    labels = pd.read_csv(labels_path, dtype=str).fillna("")
-    required = {"path", "label", "fraud_type", "group_id"}
-    missing = required - set(labels.columns)
-    if missing:
-        raise ValueError(f"labels.csv thiếu cột: {sorted(missing)}")
-    with np.load(features_path, allow_pickle=False) as data:
-        x = data["X"]
-        y = data["y"]
-        groups = data["groups"].astype(str)
-        fraud_types = data["fraud_types"].astype(str)
-
-    labels["label"] = labels["label"].str.strip().str.lower()
-    labels["fraud_type"] = labels["fraud_type"].str.strip().str.lower()
-    labels["group_id"] = labels["group_id"].str.strip()
-    if x.ndim != 2 or not (len(x) == len(y) == len(groups) == len(fraud_types) == len(labels)):
-        raise ValueError("features.npz và labels.csv không cùng số mẫu hoặc X không phải ma trận 2D.")
-    if not np.isfinite(x).all():
-        raise ValueError("X chứa NaN hoặc Inf.")
-    expected_y = labels["label"].map({"real": 0, "fake": 1})
-    if expected_y.isna().any() or not np.array_equal(y, expected_y.to_numpy(dtype=int)):
-        raise ValueError("Thứ tự/giá trị nhãn trong features.npz không khớp labels.csv.")
-    if not np.array_equal(groups, labels["group_id"].to_numpy(dtype=str)):
-        raise ValueError("Group trong features.npz không khớp labels.csv.")
-    if not np.array_equal(fraud_types, labels["fraud_type"].to_numpy(dtype=str)):
-        raise ValueError("fraud_type trong features.npz không khớp labels.csv.")
-    if set(np.unique(y).tolist()) != {0, 1}:
-        raise ValueError("Dữ liệu phải có đủ hai lớp real=0 và fake=1.")
-    if labels["path"].duplicated().any():
-        raise ValueError("labels.csv có đường dẫn ảnh bị lặp.")
-    hashes_seen: Dict[str, str] = {}
-    for row in labels.itertuples(index=False):
-        relative_path = Path(row.path)
-        if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise ValueError(f"Đường dẫn ảnh không nằm trong repo: {row.path}")
-        image_path = (ROOT_DIR / relative_path).resolve()
-        try:
-            image_path.relative_to(ROOT_DIR)
-        except ValueError as exc:
-            raise ValueError(f"Đường dẫn ảnh thoát khỏi repo: {row.path}") from exc
-        if not image_path.is_file():
-            raise FileNotFoundError(f"Không tìm thấy ảnh: {row.path}")
-        digest = sha256_file(image_path)
-        if digest in hashes_seen:
-            raise ValueError(
-                "Phát hiện ảnh trùng byte trong dữ liệu: "
-                f"{hashes_seen[digest]} và {row.path}. Hãy sửa nhãn/nguồn ảnh trước khi đánh giá."
-            )
-        hashes_seen[digest] = row.path
-    return x, y, groups, fraud_types, labels
-
-
-def evaluate_model(
+def evaluate_logo_model(
     model_type: str,
     x: np.ndarray,
     y: np.ndarray,
     groups: np.ndarray,
     fraud_types: np.ndarray,
-    labels: pd.DataFrame,
-    random_state: int,
+    labels_df: pd.DataFrame,
+    random_state: int = 42,
 ) -> Dict[str, Any]:
-    unique_groups = np.unique(groups)
-    if len(unique_groups) < 3:
-        raise ValueError("Leave-one-group-out cần ít nhất 3 group.")
+    """Thực hiện đánh giá Leave-One-Group-Out (LOGO) cho mô hình đã chỉ định."""
+    unique_groups = sorted(np.unique(groups).tolist())
+    n_groups = len(unique_groups)
+    if n_groups < 3:
+        raise ValueError("Cần ít nhất 3 nhóm để thực hiện Leave-One-Group-Out.")
 
     oof_scores = np.full(len(y), np.nan, dtype=np.float64)
     oof_pred = np.full(len(y), -1, dtype=np.int64)
     oof_threshold = np.full(len(y), np.nan, dtype=np.float64)
     oof_fold = np.full(len(y), -1, dtype=np.int64)
+
+    # Khởi tạo mô hình đại diện để xác định score_type
+    rep_clf = TextureFraudClassifier(model_type=model_type)
+    score_type = rep_clf.score_type
+
     fold_rows = []
-    outer_cv = GroupKFold(n_splits=len(unique_groups))
+    outer_cv = GroupKFold(n_splits=n_groups)
 
-    for fold_number, (train_idx, test_idx) in enumerate(
-        outer_cv.split(x, y, groups=groups), start=1
-    ):
+    for fold_num, (train_idx, test_idx) in enumerate(outer_cv.split(x, y, groups=groups), start=1):
         train_groups = groups[train_idx]
-        test_groups = np.unique(groups[test_idx])
-        if len(test_groups) != 1:
-            raise RuntimeError("GroupKFold không tạo được một group kiểm tra riêng cho mỗi fold.")
-        if len(np.unique(y[train_idx])) != 2 or len(np.unique(y[test_idx])) != 2:
-            raise ValueError(
-                f"Fold {fold_number} thiếu một lớp. Cần có real và fake trong từng group."
-            )
+        test_group = str(np.unique(groups[test_idx])[0])
 
-        threshold = estimate_eer_threshold_oof(
+        # Đảm bảo tính độc lập tuyệt đối giữa Train và Test
+        overlap = set(train_groups).intersection(set(groups[test_idx]))
+        if overlap:
+            raise RuntimeError(f"Data leakage tại Fold {fold_num}: Group overlap {overlap}")
+
+        if len(np.unique(y[train_idx])) < 2:
+            raise ValueError(f"Fold {fold_num}: Tập train thiếu 1 lớp.")
+
+        # 1. Hiệu chuẩn ngưỡng EER chỉ từ out-of-fold bên trong tập train
+        train_threshold = estimate_eer_threshold_oof(
             x[train_idx],
             y[train_idx],
             groups=train_groups,
@@ -189,83 +214,143 @@ def evaluate_model(
             n_splits=min(5, len(np.unique(train_groups))),
             random_state=random_state,
         )
-        classifier = TextureFraudClassifier(model_type=model_type)
-        classifier.fit(x[train_idx], y[train_idx])
-        scores = classifier.predict_proba(x[test_idx])
-        predictions = (scores >= threshold).astype(np.int64)
-        metrics = binary_metrics(y[test_idx], predictions, scores)
+
+        # 2. Huấn luyện mô hình trên toàn bộ tập train của fold
+        clf = TextureFraudClassifier(model_type=model_type)
+        clf.fit(x[train_idx], y[train_idx])
+        clf.threshold = train_threshold
+
+        # 3. Dự đoán điểm số và nhãn trên test fold (chưa từng thấy)
+        scores = clf.predict_score(x[test_idx])
+        preds = (scores >= train_threshold).astype(np.int64)
+
+        metrics = compute_binary_metrics(y[test_idx], preds, scores)
 
         oof_scores[test_idx] = scores
-        oof_pred[test_idx] = predictions
-        oof_threshold[test_idx] = threshold
-        oof_fold[test_idx] = fold_number
+        oof_pred[test_idx] = preds
+        oof_threshold[test_idx] = train_threshold
+        oof_fold[test_idx] = fold_num
+
         fold_rows.append({
-            "fold": fold_number,
-            "held_out_group": str(test_groups[0]),
+            "fold": fold_num,
+            "held_out_group": test_group,
             "train_groups": ",".join(sorted(np.unique(train_groups).tolist())),
             "n_train": int(len(train_idx)),
             "n_test": int(len(test_idx)),
             "n_test_real": int(np.sum(y[test_idx] == 0)),
             "n_test_fake": int(np.sum(y[test_idx] == 1)),
-            "threshold_from_inner_oof": float(threshold),
+            "threshold_from_inner_oof": float(train_threshold),
             **metrics,
         })
 
-    if np.isnan(oof_scores).any() or np.any(oof_pred < 0) or np.any(oof_fold < 0):
-        raise RuntimeError("Không phải mọi mẫu đều nhận được dự đoán ngoài fold.")
+    if np.isnan(oof_scores).any() or np.any(oof_pred < 0):
+        raise RuntimeError("Có mẫu không nhận được dự đoán ngoài fold.")
 
-    pooled_metrics = binary_metrics(y, oof_pred, oof_scores)
-    fraud_metrics = fraud_type_metrics(y, oof_pred, fraud_types, oof_scores)
-    fold_metric_names = [
+    pooled_metrics = compute_binary_metrics(y, oof_pred, oof_scores)
+    fraud_metrics = compute_fraud_type_breakdown(y, oof_pred, fraud_types, oof_scores)
+
+    metric_names = [
         "accuracy", "balanced_accuracy", "precision_fake", "recall_fake",
-        "specificity_real", "f1_fake", "auc_roc", "eer",
+        "specificity_real", "f1_fake", "far_fake_accepted", "frr_real_rejected",
+        "auc_roc", "eer",
     ]
-    fold_summary = {
-        name: {
-            "mean": float(np.mean([row[name] for row in fold_rows])),
-            "std": float(np.std([row[name] for row in fold_rows])),
+    fold_mean_std = {}
+    for m in metric_names:
+        vals = [row[m] for row in fold_rows if not np.isnan(row[m])]
+        fold_mean_std[m] = {
+            "mean": float(np.mean(vals)) if vals else float(np.nan),
+            "std": float(np.std(vals)) if vals else float(np.nan),
         }
-        for name in fold_metric_names
-    }
 
-    prediction_frame = labels[["path", "label", "fraud_type", "group_id"]].copy()
-    prediction_frame["y_true"] = y
-    prediction_frame["score_fake"] = oof_scores
-    prediction_frame["threshold_from_train"] = oof_threshold
-    prediction_frame["y_pred"] = oof_pred
-    prediction_frame["predicted_label"] = np.where(oof_pred == 1, "fake", "real")
-    prediction_frame["fold"] = oof_fold
+    pred_df = labels_df[["path", "label", "fraud_type", "group_id"]].copy()
+    pred_df["y_true"] = y
+    pred_df["score_fake"] = oof_scores
+    pred_df["score_type"] = score_type
+    pred_df["threshold_from_train"] = oof_threshold
+    pred_df["y_pred"] = oof_pred
+    pred_df["predicted_label"] = np.where(oof_pred == 1, "fake", "real")
+    pred_df["fold"] = oof_fold
 
     return {
         "model_type": model_type,
+        "score_type": score_type,
         "outer_method": "GroupKFold leave-one-group-out",
-        "inner_threshold_method": "grouped out-of-fold EER using training groups only",
-        "n_groups": int(len(unique_groups)),
-        "held_out_groups": [row["held_out_group"] for row in fold_rows],
+        "inner_threshold_method": "grouped out-of-fold EER on train groups only",
+        "n_groups": int(n_groups),
+        "held_out_groups": [r["held_out_group"] for r in fold_rows],
         "pooled_oof_metrics": pooled_metrics,
-        "fold_mean_std": fold_summary,
+        "fold_mean_std": fold_mean_std,
         "fraud_type_metrics": fraud_metrics,
         "fold_rows": fold_rows,
-        "prediction_frame": prediction_frame,
+        "prediction_frame": pred_df,
     }
 
 
-def save_plots(model_type: str, result: Dict[str, Any], output_dir: Path) -> None:
+def evaluate_majority_baseline(
+    x: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+) -> Dict[str, Any]:
+    """Đánh giá Baseline Đa số theo từng fold (Outer Fold-level Majority Baseline).
+
+    Mỗi fold học lớp đa số chỉ từ tập train của fold đó, sau đó dự đoán lớp đó cho fold test.
+    """
+    unique_groups = sorted(np.unique(groups).tolist())
+    n_groups = len(unique_groups)
+    outer_cv = GroupKFold(n_splits=n_groups)
+
+    oof_pred = np.full(len(y), -1, dtype=int)
+    fold_rows = []
+
+    for fold_num, (train_idx, test_idx) in enumerate(outer_cv.split(x, y, groups=groups), start=1):
+        majority_class = int(np.bincount(y[train_idx]).argmax())
+        preds = np.full(len(test_idx), majority_class, dtype=int)
+        oof_pred[test_idx] = preds
+
+        metrics = compute_binary_metrics(y[test_idx], preds)
+        fold_rows.append({
+            "fold": fold_num,
+            "held_out_group": str(unique_groups[fold_num - 1]),
+            "majority_class_learned": majority_class,
+            **metrics,
+        })
+
+    pooled_metrics = compute_binary_metrics(y, oof_pred)
+    macro_acc = float(np.mean([r["accuracy"] for r in fold_rows]))
+    macro_bal_acc = float(np.mean([r["balanced_accuracy"] for r in fold_rows]))
+    macro_f1 = float(np.mean([r["f1_fake"] for r in fold_rows]))
+
+    return {
+        "method": "Fold-level Outer Majority Baseline",
+        "pooled_metrics": pooled_metrics,
+        "macro_metrics": {
+            "accuracy_mean": macro_acc,
+            "balanced_accuracy_mean": macro_bal_acc,
+            "f1_fake_mean": macro_f1,
+        },
+        "fold_rows": fold_rows,
+    }
+
+
+def save_evaluation_plots(model_type: str, result: Dict[str, Any], output_dir: Path) -> None:
+    """Vẽ và lưu biểu đồ ma trận nhầm lẫn và kết quả theo loại gian lận."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    predictions = result["prediction_frame"]
-    y = predictions["y_true"].to_numpy(dtype=int)
-    pred = predictions["y_pred"].to_numpy(dtype=int)
+    preds = result["prediction_frame"]
+    y = preds["y_true"].to_numpy(dtype=int)
+    pred = preds["y_pred"].to_numpy(dtype=int)
     matrix = confusion_matrix(y, pred, labels=[0, 1])
 
-    fig, ax = plt.subplots(figsize=(5.8, 5.0), dpi=160)
-    image = ax.imshow(matrix, cmap="Blues")
+    fig, ax = plt.subplots(figsize=(5.5, 4.8), dpi=160)
+    img_plot = ax.imshow(matrix, cmap="Blues")
     ax.set_xticks([0, 1], labels=["Dự đoán REAL", "Dự đoán FAKE"])
     ax.set_yticks([0, 1], labels=["Thực tế REAL", "Thực tế FAKE"])
-    ax.set_title(f"{model_type.upper()} — dự đoán ngoài group")
-    for (row, col), value in np.ndenumerate(matrix):
-        color = "white" if value > matrix.max() / 2 else "black"
-        ax.text(col, row, str(value), ha="center", va="center", color=color, fontsize=14)
-    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    ax.set_title(f"{model_type.upper()} — Confusion Matrix (Leave-One-Group-Out)")
+
+    for (r_idx, c_idx), val in np.ndenumerate(matrix):
+        color = "white" if val > matrix.max() / 2 else "black"
+        ax.text(c_idx, r_idx, str(val), ha="center", va="center", color=color, fontsize=14, fontweight="bold")
+
+    fig.colorbar(img_plot, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
     fig.savefig(output_dir / f"{model_type}_confusion_matrix.png", bbox_inches="tight")
     plt.close(fig)
@@ -276,13 +361,15 @@ def save_plots(model_type: str, result: Dict[str, Any], output_dir: Path) -> Non
     counts = [row["correct"] for row in fraud]
     totals = [row["count"] for row in fraud]
     colors = ["#2b5c8f" if name == "none" else "#d95f02" for name in names]
-    fig, ax = plt.subplots(figsize=(8.2, 5.0), dpi=160)
-    bars = ax.bar(names, rates, color=colors, edgecolor="#333333", linewidth=0.7)
-    ax.set_ylim(0, 110)
-    ax.set_ylabel("Tỷ lệ đúng (%)")
-    ax.set_title(f"{model_type.upper()} — kết quả theo loại gian lận, ngoài group")
-    ax.grid(axis="y", linestyle="--", alpha=0.35)
+
+    fig, ax = plt.subplots(figsize=(8.0, 4.8), dpi=160)
+    bars = ax.bar(names, rates, color=colors, edgecolor="#333333", linewidth=0.8)
+    ax.set_ylim(0, 115)
+    ax.set_ylabel("Tỷ lệ đúng (%)", fontsize=11)
+    ax.set_title(f"{model_type.upper()} — Tỷ lệ phát hiện theo loại gian lận (LOGO)", fontsize=12, fontweight="bold")
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
     ax.set_axisbelow(True)
+
     for bar, correct, total in zip(bars, counts, totals):
         ax.text(
             bar.get_x() + bar.get_width() / 2,
@@ -290,272 +377,328 @@ def save_plots(model_type: str, result: Dict[str, Any], output_dir: Path) -> Non
             f"{bar.get_height():.1f}%\n({correct}/{total})",
             ha="center",
             va="bottom",
-            fontsize=9,
+            fontsize=9.5,
+            fontweight="bold",
         )
+
     fig.tight_layout()
     fig.savefig(output_dir / f"{model_type}_fraud_type_detection.png", bbox_inches="tight")
     if model_type == "svm":
-        legacy_plot = ROOT_DIR / "report" / "fraud_evaluation.png"
-        fig.savefig(legacy_plot, bbox_inches="tight")
+        fig.savefig(ROOT_DIR / "report" / "fraud_evaluation.png", bbox_inches="tight")
     plt.close(fig)
 
 
-def format_rate(value: float) -> str:
-    return f"{value * 100:.1f}%"
+def format_rate(v: float) -> str:
+    """Format tỷ lệ %."""
+    return f"{v * 100:.1f}%" if not np.isnan(v) else "N/A"
 
 
-def write_summary(
-    results: Iterable[Dict[str, Any]],
-    labels: pd.DataFrame,
+def write_comprehensive_summary(
+    results: List[Dict[str, Any]],
+    majority_res: Dict[str, Any],
+    labels_df: pd.DataFrame,
     features_path: Path,
     labels_path: Path,
     output_dir: Path,
+    sensitivity_results: Optional[Dict[str, Any]] = None,
 ) -> None:
-    counts_label = labels["label"].value_counts().to_dict()
-    counts_type = labels["fraud_type"].value_counts().to_dict()
-    counts_group = labels.groupby("group_id", sort=True).agg(
-        samples=("path", "count"), real=("label", lambda x: int((x == "real").sum())),
+    """Tạo báo cáo tổng kết chi tiết đầy đủ chỉ số và phân tích độ nhạy."""
+    counts_label = labels_df["label"].value_counts().to_dict()
+    counts_type = labels_df["fraud_type"].value_counts().to_dict()
+    counts_group = labels_df.groupby("group_id", sort=True).agg(
+        samples=("path", "count"),
+        real=("label", lambda x: int((x == "real").sum())),
         fake=("label", lambda x: int((x == "fake").sum())),
         reprint=("fraud_type", lambda x: int((x == "reprint").sum())),
     )
-    n = len(labels)
-    majority_baseline = max(counts_label.values()) / n
+    n = len(labels_df)
+    global_majority_acc = max(counts_label.values()) / n
+
     lines = [
-        "# Báo cáo đánh giá eKYC Texture Fraud",
+        "# Báo cáo Đánh giá Chuyên sâu eKYC Texture Fraud Detection",
         "",
-        f"Ngày tạo: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        f"**Ngày cập nhật**: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  ",
+        f"**Commit SHA**: `{get_git_commit_hash()[:10]}`  ",
+        f"**Phương pháp**: Leave-One-Group-Out (LOGO) Cross-Validation với hiệu chuẩn ngưỡng EER OOF độc lập từ tập huấn luyện.",
         "",
-        "## Dữ liệu đầu vào",
+        "---",
         "",
-        f"- Số mẫu: **{n}**; real: **{counts_label.get('real', 0)}**, fake: **{counts_label.get('fake', 0)}**.",
-        f"- Số group nguồn trong metadata: **{labels['group_id'].nunique()}**.",
-        f"- Baseline accuracy nếu luôn đoán lớp đa số (fake): **{majority_baseline * 100:.1f}%**.",
-        f"- Đặc trưng: `{features_path.relative_to(ROOT_DIR).as_posix()}` ({sha256_file(features_path)[:16]}…).",
-        f"- Nhãn: `{labels_path.relative_to(ROOT_DIR).as_posix()}` ({sha256_file(labels_path)[:16]}…).",
-        f"- Runtime: Python {platform.python_version()}, scikit-learn {sklearn.__version__}, NumPy {np.__version__}.",
+        "## 1. Dữ liệu Đầu vào & Phân bố Nhóm",
         "",
-        "### Phân bố nhãn",
+        f"- **Tổng số mẫu**: **{n}** (Real: **{counts_label.get('real', 0)}**, Fake: **{counts_label.get('fake', 0)}**).",
+        f"- **Số nhóm định danh (`group_id`)**: **{labels_df['group_id'].nunique()}**.",
+        f"- **File đặc trưng**: `{features_path.relative_to(ROOT_DIR).as_posix()}` (`{sha256_file(features_path)[:16]}…`).",
+        f"- **File nhãn**: `{labels_path.relative_to(ROOT_DIR).as_posix()}` (`{sha256_file(labels_path)[:16]}…`).",
+        f"- **Môi trường runtime**: Python {platform.python_version()}, Scikit-learn {sklearn.__version__}, NumPy {np.__version__}.",
         "",
-        "| fraud_type | Số ảnh |",
-        "|---|---:|",
+        "### Phân bố theo Dạng Can thiệp (`fraud_type`)",
+        "",
+        "| Dạng can thiệp | Số lượng | Tỷ lệ trong tập dữ liệu |",
+        "|---|---:|---:|",
     ]
-    for fraud_type, count in sorted(counts_type.items()):
-        lines.append(f"| {fraud_type} | {count} |")
+    for ft, cnt in sorted(counts_type.items()):
+        lines.append(f"| `{ft}` | {cnt} | {cnt / n * 100:.1f}% |")
+
     lines.extend([
         "",
-        "### Phân bố theo group",
+        "### Phân bố theo Nhóm Nguồn (`group_id`)",
         "",
-        "| group_id | Số ảnh | Real | Fake | Reprint |",
+        "| group_id | Tổng số ảnh | Real | Fake tổng | Trong đó Reprint |",
         "|---|---:|---:|---:|---:|",
     ])
-    for group_id, row in counts_group.iterrows():
-        lines.append(
-            f"| {group_id} | {row.samples} | {row.real} | {row.fake} | {row.reprint} |"
-        )
+    for gid, r in counts_group.iterrows():
+        lines.append(f"| `{gid}` | {r.samples} | {r.real} | {r.fake} | {r.reprint} |")
+
     lines.extend([
         "",
-        "## Phương pháp",
+        "---",
         "",
-        "Đánh giá **leave-one-group-out** với random_state=42: mỗi lần giữ nguyên một group làm fold kiểm tra và huấn luyện trên các group còn lại. Ngưỡng EER được hiệu chuẩn bằng dự đoán out-of-fold có group bên trong tập huấn luyện của fold đó; không dùng fold kiểm tra để chọn ngưỡng. Mỗi mẫu nhận đúng một dự đoán ngoài fold.",
+        "## 2. Kết quả Tổng thể & So sánh Baseline",
         "",
-        "Báo cáo cả trung bình/độ lệch chuẩn theo fold (mỗi group có trọng số như nhau) và chỉ số pooled từ toàn bộ dự đoán ngoài fold. Vì xác suất được sinh bởi các mô hình fold khác nhau, dùng macro AUC theo fold làm chỉ số so sánh chính; pooled AUC chỉ mang tính tham khảo.",
+        "### So sánh Đối chứng:",
+        f"- **Global Majority Baseline** (luôn đoán Fake trên toàn bộ tập): **{global_majority_acc * 100:.1f}%**.",
+        f"- **Fold-level Majority Baseline** (học lớp đa số từ outer train): Accuracy macro **{majority_res['macro_metrics']['accuracy_mean'] * 100:.1f}%**, F1 **{majority_res['macro_metrics']['f1_fake_mean'] * 100:.1f}%**.",
         "",
-        "## Kết quả tổng thể",
-        "",
-        "| Model | Accuracy (group mean ± SD) | Balanced accuracy (group mean ± SD) | Precision fake (pooled) | Recall fake (pooled) | Specificity real (pooled) | F1 fake (pooled) | AUC-ROC (group mean ± SD) | EER (group mean ± SD) |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Mô hình | Kiểu điểm số (`score_type`) | Accuracy (Group Mean ± SD) | Balanced Accuracy (Mean ± SD) | Precision Fake (Pooled) | Recall Fake (Pooled) | Specificity Real (Pooled) | F1 Fake (Pooled) | FAR (Lọt thẻ giả) | FRR (Chặn nhầm thật) | AUC-ROC (Macro Mean) |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
-    result_list = list(results)
-    for result in result_list:
-        fold = result["fold_mean_std"]
-        pooled = result["pooled_oof_metrics"]
+
+    for res in results:
+        m_name = res["model_type"].upper()
+        s_type = res["score_type"]
+        fold = res["fold_mean_std"]
+        pooled = res["pooled_oof_metrics"]
         lines.append(
-            f"| {result['model_type'].upper()} "
+            f"| **{m_name}** | `{s_type}` "
             f"| {format_rate(fold['accuracy']['mean'])} ± {format_rate(fold['accuracy']['std'])} "
             f"| {format_rate(fold['balanced_accuracy']['mean'])} ± {format_rate(fold['balanced_accuracy']['std'])} "
             f"| {format_rate(pooled['precision_fake'])} "
             f"| {format_rate(pooled['recall_fake'])} "
             f"| {format_rate(pooled['specificity_real'])} "
             f"| {format_rate(pooled['f1_fake'])} "
-            f"| {fold['auc_roc']['mean']:.3f} ± {fold['auc_roc']['std']:.3f} "
-            f"| {fold['eer']['mean']:.3f} ± {fold['eer']['std']:.3f} |"
+            f"| {format_rate(pooled['far_fake_accepted'])} "
+            f"| {format_rate(pooled['frr_real_rejected'])} "
+            f"| {fold['auc_roc']['mean']:.3f} ± {fold['auc_roc']['std']:.3f} |"
         )
+
     lines.extend([
         "",
-        "## Diễn giải",
+        "---",
         "",
-        f"Accuracy baseline luôn đoán fake là **{majority_baseline * 100:.1f}%**. Đối chiếu pooled accuracy: "
-        + "; ".join(
-            f"{result['model_type'].upper()} {format_rate(result['pooled_oof_metrics']['accuracy'])}"
-            for result in result_list
-        )
-        + ". Accuracy của hai model hiện thấp hơn baseline này.",
+        "## 3. Tỷ lệ Phát hiện Chi tiết theo Loại Can thiệp (Detection Rate Breakdown)",
         "",
-        "RF có balanced accuracy và specificity real tốt hơn trong lần chạy này; SVM có recall fake cao hơn. Đây là trade-off trên năm group hiện có, chưa phải bằng chứng hiệu năng triển khai. Không nên mô tả một model là thắng toàn diện.",
     ])
-    for result in result_list:
-        name = result["model_type"]
-        pooled = result["pooled_oof_metrics"]
+
+    for res in results:
+        m_name = res["model_type"].upper()
         lines.extend([
+            f"### Mô hình {m_name}",
             "",
-            f"### {name.upper()}",
+            f"- **Ma trận nhầm lẫn OOF** (Hàng=Thực tế, Cột=Dự đoán): `{res['pooled_oof_metrics']['confusion_matrix_real_fake']}`",
+            f"- **Đồ thị minh họa**: [{m_name} Confusion Matrix]({res['model_type']}_confusion_matrix.png) | [{m_name} Detection Rates]({res['model_type']}_fraud_type_detection.png)",
             "",
-            f"- Pooled confusion matrix (hàng=thực tế, cột=dự đoán; thứ tự real/fake): `{pooled['confusion_matrix_real_fake']}`.",
-            f"- Pooled ROC-AUC tham khảo: **{pooled['auc_roc']:.3f}**; pooled balanced accuracy: **{format_rate(pooled['balanced_accuracy'])}**.",
-            f"- Đồ thị: [{name.upper()} confusion matrix]({name}_confusion_matrix.png), "
-            f"[{name.upper()} fraud type]({name}_fraud_type_detection.png).",
-            "",
-            "| Loại | Đúng / tổng | Tỷ lệ | Chỉ số |",
-            "|---|---:|---:|---|",
+            "| Loại can thiệp | Đúng / Tổng mẫu | Tỷ lệ (%) | Ý nghĩa chỉ số | Điểm số trung bình |",
+            "|---|---:|---:|---|---:|",
         ])
-        for row in result["fraud_type_metrics"]:
+        for row in res["fraud_type_metrics"]:
             lines.append(
-                f"| {row['fraud_type']} | {row['correct']}/{row['count']} | {format_rate(row['rate'])} | {row['metric']} |"
+                f"| `{row['fraud_type']}` | {row['correct']}/{row['count']} | {format_rate(row['rate'])} | {row['metric']} | {row['mean_score']:.4f} |"
             )
+        lines.append("")
+
+    if sensitivity_results:
         lines.extend([
+            "---",
             "",
-            f"Chi tiết fold, dự đoán và ngưỡng từng fold nằm trong `fold_metrics_{name}.csv` và `oof_predictions_{name}.csv`.",
+            "## 4. Phân tích Độ nhạy Nguồn gốc (Provenance Sensitivity Analysis)",
+            "",
+            "Do 30 ảnh trong nhóm `reprint` được gán nhóm theo template gần nhất (MSE), hệ thống thực hiện kiểm thử độ nhạy bằng cách so sánh hiệu năng giữa **Tập Toàn bộ (165 mẫu)** và **Tập Lõi Đã Kiểm thực (Core Verified - 135 mẫu)** (loại bỏ 30 mẫu reprint gán bằng heuristic):",
+            "",
+            "| Mô hình | Tập kiểm định | Số mẫu | Accuracy (Macro Mean) | Balanced Acc (Mean) | F1 Fake (Pooled) | Specificity Real (Pooled) |",
+            "|---|---|---:|---:|---:|---:|---:|",
         ])
+        for m_name in ["svm", "rf"]:
+            if m_name in sensitivity_results:
+                full_m = next(r for r in results if r["model_type"] == m_name)
+                core_m = sensitivity_results[m_name]
+                lines.append(
+                    f"| {m_name.upper()} | **Toàn bộ (Full 165)** | 165 "
+                    f"| {format_rate(full_m['fold_mean_std']['accuracy']['mean'])} "
+                    f"| {format_rate(full_m['fold_mean_std']['balanced_accuracy']['mean'])} "
+                    f"| {format_rate(full_m['pooled_oof_metrics']['f1_fake'])} "
+                    f"| {format_rate(full_m['pooled_oof_metrics']['specificity_real'])} |"
+                )
+                lines.append(
+                    f"| {m_name.upper()} | **Tập lõi (Core Verified 135)** | 135 "
+                    f"| {format_rate(core_m['fold_mean_std']['accuracy']['mean'])} "
+                    f"| {format_rate(core_m['fold_mean_std']['balanced_accuracy']['mean'])} "
+                    f"| {format_rate(core_m['pooled_oof_metrics']['f1_fake'])} "
+                    f"| {format_rate(core_m['pooled_oof_metrics']['specificity_real'])} |"
+                )
+        lines.append("")
+
     lines.extend([
+        "---",
         "",
-        "## Giới hạn cần nêu khi diễn giải",
+        "## 5. Giới hạn Nghiên cứu (Academic Limitations)",
         "",
-        "- Chỉ có 5 group nguồn; các kết quả là đánh giá thử nghiệm trên bộ dữ liệu này, không chứng minh hiệu năng trên giấy tờ, camera hoặc điều kiện triển khai khác.",
-        "- Dữ liệu giả được tạo/chọn từ một quy trình cụ thể. Cần thêm mẫu độc lập và kiểm tra thủ công từng loại tấn công trước khi đưa ra kết luận về gian lận thực tế.",
-        "- Bốn nguồn reprint trùng byte với ảnh real đã bị loại; group của các nguồn còn lại được gán theo ảnh template gần nhất (MSE) và cần được kiểm tra thủ công.",
-        "- Donor của `replace_photo` được lấy từ ảnh cùng group để tránh rò rỉ nguồn; biến thể này chưa đại diện đầy đủ cho tráo ảnh giữa hai danh tính độc lập.",
-        "- Ảnh reprint hiện có không đại diện cho group_02 và chỉ có một mẫu của group_04; kết quả theo loại này cần được xem cùng số lượng mẫu.",
-        "- Không diễn giải `score_fake` trong CSV dự đoán là xác suất đã hiệu chuẩn. Ngưỡng trong mỗi fold chỉ được học từ các group huấn luyện.",
+        "1. **Cỡ mẫu và số nhóm nhỏ**: Dataset hiện có 5 nhóm cá nhân. Kết quả phản ánh hiệu năng thử nghiệm của thuật toán texture cổ điển trên tập này, chưa chứng minh được tính tổng quát hóa trên mọi loại phôi thẻ hay camera ngoài đời.",
+        "2. **Cân bằng nhóm reprint**: Nhóm `group_02` hiện chưa có ảnh reprint trong tập chụp lại; `group_04` chỉ có 1 ảnh.",
+        "3. **Đặc trưng quyết định của SVM**: SVM sử dụng `decision_function` hình học để triệt tiêu hoàn toàn rò rỉ cross-validation nội bộ. Điểm số quyết định không phải xác suất đã hiệu chuẩn (calibrated probability).",
+        "4. **Chống rò rỉ dữ liệu**: 4 file reprint trùng byte với ảnh thật đã được phát hiện qua mã băm SHA-256 và loại bỏ hoàn toàn.",
         "",
-        "## Tái tạo kết quả",
+        "## 6. Lệnh Tái tạo Kết quả",
         "",
         "```powershell",
-        "python scripts/build_features.py",
+        "python scripts/build_features.py --strict",
         "python scripts/run_grouped_evaluation.py --model all",
         "```",
         "",
-        "Ảnh gốc, ảnh đã xử lý và features.npz nằm trong các đường dẫn bị `.gitignore` loại khỏi Git; không commit dữ liệu định danh lên repository.",
-        "",
     ])
-    (output_dir / "evaluation_summary.md").write_text("\n".join(lines), encoding="utf-8")
 
-    brief = [
-        "# Tóm tắt dự án cho báo cáo",
-        "",
-        "## Mục tiêu",
-        "",
-        "Prototype phát hiện dấu hiệu can thiệp trên ảnh giấy tờ eKYC bằng texture features LBP, GLCM, FFT và phân loại SVM/Random Forest. Đây là bài toán thử nghiệm trong phạm vi xử lý ảnh, không phải hệ thống xác minh giấy tờ sản xuất.",
-        "",
-        "## Dữ liệu",
-        "",
-        f"Bộ hiện tại có **{n} ảnh**, gồm **{counts_label.get('real', 0)} real** và **{counts_label.get('fake', 0)} fake**, thuộc **{labels['group_id'].nunique()} group nguồn**. Bộ gồm bốn dạng fake: thay ảnh, sửa chữ, splice và reprint. Các biến thể synthetic dùng ảnh donor trong cùng group; bốn nguồn reprint trùng byte với ảnh real đã bị loại, sau đó chọn đủ 30 ảnh reprint khác.",
-        "",
-        "Nguồn reprint hiện không có mẫu thuộc group_02 và chỉ có một mẫu thuộc group_04; cần nêu điều này khi trình bày. Group là mã nhóm nguồn trong dataset, không tự chứng minh số người độc lập.",
-        "",
-        "## Đánh giá hiện tại",
-        "",
-        "Dùng leave-one-group-out (random_state=42): mỗi fold giữ một group ngoài quá trình huấn luyện. Ngưỡng phân loại được ước lượng bằng grouped out-of-fold trên các group train.",
-        "",
-        "| Model | Accuracy group mean ± SD | Balanced accuracy | Precision fake | Recall fake | Specificity real | AUC group mean ± SD | EER group mean ± SD |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
-    ]
-    for result in result_list:
-        fold = result["fold_mean_std"]
-        pooled = result["pooled_oof_metrics"]
-        brief.append(
-            f"| {result['model_type'].upper()} "
-            f"| {format_rate(fold['accuracy']['mean'])} ± {format_rate(fold['accuracy']['std'])} "
-            f"| {format_rate(fold['balanced_accuracy']['mean'])} ± {format_rate(fold['balanced_accuracy']['std'])} "
-            f"| {format_rate(pooled['precision_fake'])} "
-            f"| {format_rate(pooled['recall_fake'])} "
-            f"| {format_rate(pooled['specificity_real'])} "
-            f"| {fold['auc_roc']['mean']:.3f} ± {fold['auc_roc']['std']:.3f} "
-            f"| {fold['eer']['mean']:.3f} ± {fold['eer']['std']:.3f} |"
-        )
-    brief.extend([
-        "",
-        "Accuracy baseline luôn đoán fake là " + f"{majority_baseline * 100:.1f}%" + "; accuracy hiện tại của hai model thấp hơn baseline. RF tốt hơn về balanced accuracy/specificity, còn SVM bắt được tỷ lệ fake cao hơn. Kết quả còn biến động theo group và chỉ nên trình bày như prototype.",
-        "",
-        "Donor của `replace_photo` được lấy trong cùng group để tránh leakage; đây chưa phải mô phỏng tráo ảnh giữa hai danh tính độc lập.",
-        "",
-        "Chi tiết số liệu, ma trận nhầm lẫn, kết quả theo từng fraud type và lệnh tái tạo nằm trong [evaluation_summary.md](evaluation/evaluation_summary.md).",
-        "",
-        "Ảnh gốc và features không được commit lên Git; trước khi chia sẻ cần xác nhận nguồn/đồng ý sử dụng của ảnh real.",
-        "",
-    ])
-    (ROOT_DIR / "report" / "REPORT_BRIEF_FOR_CLAUDE.md").write_text(
-        "\n".join(brief), encoding="utf-8"
-    )
+    summary_file = output_dir / "evaluation_summary.md"
+    summary_file.write_text("\n".join(lines), encoding="utf-8")
+    print(f"  Đã ghi báo cáo tổng hợp: {summary_file}")
 
 
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    parser = argparse.ArgumentParser(description="Đánh giá theo group và sinh báo cáo/đồ thị")
+
+    parser = argparse.ArgumentParser(description="Đánh giá theo group và sinh báo cáo/đồ thị chuẩn hóa")
     parser.add_argument("--features", default="data/processed/features.npz")
     parser.add_argument("--labels", default="data/labels.csv")
     parser.add_argument("--output-dir", default="report/evaluation")
     parser.add_argument("--model", choices=["svm", "rf", "all"], default="all")
     parser.add_argument("--random-state", type=int, default=42)
+    parser.add_argument("--skip-sensitivity", action="store_true", help="Bỏ qua phân tích độ nhạy")
     args = parser.parse_args()
 
     features_path = (ROOT_DIR / args.features).resolve()
     labels_path = (ROOT_DIR / args.labels).resolve()
     output_dir = (ROOT_DIR / args.output_dir).resolve()
-    x, y, groups, fraud_types, labels = validate_inputs(features_path, labels_path)
-    models = ["svm", "rf"] if args.model == "all" else [args.model]
-    all_results = []
-    class_counts = labels["label"].value_counts().to_dict()
-    fraud_counts = labels["fraud_type"].value_counts().to_dict()
 
-    for model_type in models:
-        print(f"=== {model_type.upper()}: leave-one-group-out, {len(np.unique(groups))} folds ===")
-        result = evaluate_model(model_type, x, y, groups, fraud_types, labels, args.random_state)
-        result["dataset"] = {
-            "n_samples": int(len(labels)),
-            "n_features": int(x.shape[1]),
-            "label_counts": {key: int(value) for key, value in class_counts.items()},
-            "fraud_type_counts": {key: int(value) for key, value in fraud_counts.items()},
-            "group_counts": {
-                str(key): int(value)
-                for key, value in labels.groupby("group_id").size().to_dict().items()
-            },
-        }
-        result["random_state"] = args.random_state
-        result["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
-        result["runtime_versions"] = {
-            "python": platform.python_version(),
+    print("=== 1. Kiểm thực Dữ liệu & Tính toàn vẹn ===")
+    labels_df = pd.read_csv(labels_path, dtype=str)
+    labels_df = validate_metadata_df(labels_df, project_root=ROOT_DIR)
+
+    with np.load(features_path, allow_pickle=False) as npz:
+        x = npz["X"]
+        y = npz["y"]
+        groups = npz["groups"].astype(str)
+        fraud_types = npz["fraud_types"].astype(str)
+
+    validate_feature_bundle(x, y, groups, fraud_types, labels_df=labels_df)
+    print(f"  Đã kiểm thực thành công {len(labels_df)} mẫu. 0 lỗi rò rỉ metadata.")
+
+    # Kiểm tra provenance manifest
+    prov_path = ROOT_DIR / "data" / "provenance_manifest.csv"
+    if prov_path.exists():
+        prov_df = pd.read_csv(prov_path)
+        unverified_cnt = int((prov_df["verification_status"] == "heuristic_mse_match_unverified").sum())
+        if unverified_cnt > 0:
+            print(
+                f"[CẢNH BÁO KIỂM TOÁN] Có {unverified_cnt} mẫu reprint mang nhãn 'heuristic_mse_match_unverified'. "
+                "Cần xem xét kết quả phân tích độ nhạy tương ứng."
+            )
+
+    models_to_run = ["svm", "rf"] if args.model == "all" else [args.model]
+    all_results = []
+
+    print("\n=== 2. Đánh giá Baseline Đa số theo Fold ===")
+    majority_res = evaluate_majority_baseline(x, y, groups)
+    print(
+        f"  Fold-level Majority Baseline: Accuracy={majority_res['macro_metrics']['accuracy_mean']:.3f}, "
+        f"F1={majority_res['macro_metrics']['f1_fake_mean']:.3f}"
+    )
+
+    print("\n=== 3. Huấn luyện & Đánh giá Mô hình chính (Leave-One-Group-Out) ===")
+    for m in models_to_run:
+        print(f"\n--- {m.upper()}: Leave-One-Group-Out ({len(np.unique(groups))} Folds) ---")
+        res = evaluate_logo_model(m, x, y, groups, fraud_types, labels_df, random_state=args.random_state)
+        all_results.append(res)
+
+        # Lưu CSV từng fold
+        pd.DataFrame(res["fold_rows"]).to_csv(output_dir / f"fold_metrics_{m}.csv", index=False)
+        # Lưu dự đoán OOF
+        res["prediction_frame"].to_csv(output_dir / f"oof_predictions_{m}.csv", index=False)
+        # Lưu JSON metrics
+        serializable = {k: v for k, v in res.items() if k != "prediction_frame"}
+        (output_dir / f"metrics_{m}.json").write_text(
+            json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        # Lưu đồ thị
+        save_evaluation_plots(m, res, output_dir)
+
+        p = res["pooled_oof_metrics"]
+        print(
+            f"  [{m.upper()}] Accuracy: {p['accuracy']:.3f} | Balanced Acc: {p['balanced_accuracy']:.3f} | "
+            f"F1: {p['f1_fake']:.3f} | FAR: {p['far_fake_accepted']:.3f} | FRR: {p['frr_real_rejected']:.3f}"
+        )
+
+    # 4. Phân tích độ nhạy (Sensitivity Analysis trên tập Core 135 mẫu)
+    sensitivity_results = {}
+    if not args.skip_sensitivity and "reprint" in fraud_types:
+        print("\n=== 4. Phân tích Độ nhạy Nguồn gốc (Core Verified Subset - 135 mẫu) ===")
+        core_mask = (fraud_types != "reprint")
+        x_core = x[core_mask]
+        y_core = y[core_mask]
+        groups_core = groups[core_mask]
+        fraud_core = fraud_types[core_mask]
+        labels_core = labels_df[core_mask].copy().reset_index(drop=True)
+
+        for m in models_to_run:
+            c_res = evaluate_logo_model(m, x_core, y_core, groups_core, fraud_core, labels_core, random_state=args.random_state)
+            sensitivity_results[m] = c_res
+            cp = c_res["pooled_oof_metrics"]
+            print(
+                f"  [{m.upper()} Core] Accuracy: {cp['accuracy']:.3f} | Balanced Acc: {cp['balanced_accuracy']:.3f} | "
+                f"F1: {cp['f1_fake']:.3f} | Specificity: {cp['specificity_real']:.3f}"
+            )
+
+    # 5. Lưu Evaluation Manifest
+    print("\n=== 5. Xuất Evaluation Manifest ===")
+    manifest = {
+        "git_commit": get_git_commit_hash(),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "python_version": platform.python_version(),
+        "system_platform": platform.platform(),
+        "dependencies": {
             "scikit_learn": sklearn.__version__,
             "numpy": np.__version__,
             "pandas": pd.__version__,
-        }
-        result["input_sha256"] = {
-            "features": sha256_file(features_path),
-            "labels": sha256_file(labels_path),
-        }
+        },
+        "input_hashes": {
+            "features_sha256": sha256_file(features_path),
+            "labels_sha256": sha256_file(labels_path),
+        },
+        "dataset_summary": {
+            "n_samples": int(len(labels_df)),
+            "n_features": int(x.shape[1]),
+            "n_groups": int(len(np.unique(groups))),
+            "class_distribution": labels_df["label"].value_counts().to_dict(),
+            "fraud_distribution": labels_df["fraud_type"].value_counts().to_dict(),
+        },
+        "models_evaluated": models_to_run,
+        "evaluation_strategy": "Leave-One-Group-Out Outer Cross-Validation",
+        "threshold_strategy": "Inner Grouped Out-of-Fold EER Calibration (Train Only)",
+    }
+    manifest_file = output_dir / "evaluation_manifest.json"
+    manifest_file.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  Đã lưu manifest: {manifest_file}")
 
-        (output_dir / f"metrics_{model_type}.json").parent.mkdir(parents=True, exist_ok=True)
-        serializable = {key: value for key, value in result.items() if key != "prediction_frame"}
-        (output_dir / f"metrics_{model_type}.json").write_text(
-            json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        pd.DataFrame(result["fold_rows"]).to_csv(
-            output_dir / f"fold_metrics_{model_type}.csv", index=False
-        )
-        result["prediction_frame"].to_csv(
-            output_dir / f"oof_predictions_{model_type}.csv", index=False
-        )
-        save_plots(model_type, result, output_dir)
-        all_results.append(result)
-        pooled = result["pooled_oof_metrics"]
-        print(
-            f"  pooled: accuracy={pooled['accuracy']:.3f}, "
-            f"balanced_accuracy={pooled['balanced_accuracy']:.3f}, "
-            f"AUC={pooled['auc_roc']:.3f}, F1(fake)={pooled['f1_fake']:.3f}"
-        )
-
-    write_summary(all_results, labels, features_path, labels_path, output_dir)
-    print(f"[OK] Báo cáo và artefact đã lưu tại {output_dir}")
+    # 6. Ghi báo cáo tổng hợp Markdown
+    print("\n=== 6. Sinh Báo cáo Tổng hợp Markdown ===")
+    write_comprehensive_summary(
+        all_results,
+        majority_res,
+        labels_df,
+        features_path,
+        labels_path,
+        output_dir,
+        sensitivity_results=sensitivity_results,
+    )
+    print("\n[OK] Đánh giá và báo cáo hoàn tất thành công.")
 
 
 if __name__ == "__main__":

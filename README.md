@@ -22,16 +22,16 @@ Không dùng Deep Learning nặng.
 | `data/fake` | Ảnh giả do nhóm tự tạo |
 | `data/processed` | Ảnh sau tiền xử lý (856x540, ảnh xám) |
 | `src/preprocess` | Perspective Transform, chuyển xám, chuẩn hóa kích thước |
-| `src/features` | Trích đặc trưng LBP, GLCM, FFT |
-| `src/models` | Huấn luyện SVM/Random Forest, đánh giá |
+| `src/features` | Trích đặc trưng LBP, GLCM, FFT (tổng 60 chiều) |
+| `src/models` | Huấn luyện SVM/Random Forest, đánh giá LOGO CV |
+| `tests` | Bộ kiểm thử tự động toàn diện (35 tests) |
 | `notebooks` | Notebook thử nghiệm, vẽ biểu đồ |
-| `report` | Báo cáo, slide, hình minh họa |
+| `report/evaluation` | Báo cáo đánh giá, manifest và biểu đồ thực nghiệm |
 
 ## Dữ liệu
 
 Ảnh không được đưa lên GitHub (repo chặn bằng `.gitignore`).
-Repo chỉ có file data/labels_sample.csv để minh họa; trước khi chạy pipeline, tạo
-data/labels.csv theo đúng cấu trúc đó và điền đường dẫn tới bộ ảnh được nhóm chia sẻ.
+Repo có file `data/labels.csv` định nghĩa nhãn và `data/provenance_manifest.csv` lưu nguồn gốc chi tiết từng ảnh.
 Không đưa giấy tờ thật hoặc dữ liệu định danh lên GitHub.
 
 Lưu ý: chỉ dùng mẫu CCCD/GCMT công khai hoặc minh họa với thông tin bịa.
@@ -41,7 +41,7 @@ Tuyệt đối không dùng giấy tờ thật của người thật.
 
 **Ảnh chuẩn hóa:** kích thước 856x540, ảnh xám (grayscale).
 
-**Nhãn:** file `data/labels.csv` gồm 4 cột:
+**Nhãn:** file `data/labels.csv` gồm 4 cột bắt buộc:
 
 | Cột | Giá trị |
 |---|---|
@@ -50,28 +50,16 @@ Tuyệt đối không dùng giấy tờ thật của người thật.
 | `fraud_type` | `none`, `replace_photo`, `edit_text`, `splice`, `reprint` |
 | `group_id` | ID nhóm ảnh gốc — ảnh gốc và mọi bản giả tạo từ nó phải cùng group_id để chống rò rỉ dữ liệu khi chia train/test |
 
-**Giao diện hàm:** mỗi hàm nhận một ảnh xám dạng numpy array, trả về một vector đặc trưng 1 chiều.
+**Giao diện hàm đặc trưng:** mỗi hàm nhận một ảnh xám dạng numpy array, trả về một vector đặc trưng 1 chiều.
 
 ```python
-extract_lbp(img)   # -> vector
-extract_glcm(img)  # -> vector
-extract_fft(img)   # -> vector
+extract_lbp(img)   # -> vector 10 chiều (chuẩn hóa histogram sum=1)
+extract_glcm(img)  # -> vector 18 chiều (contrast, dissimilarity, homogeneity, energy, correlation, ASM trên 3 khoảng cách x 6 góc)
+extract_fft(img)   # -> vector 32 chiều (16 vòng tròn tần số bán kính + 16 dải góc định hướng, sum=1)
+extract_all_features(img) # -> vector ghép 60 chiều
 ```
 
-**Chống rò rỉ dữ liệu:** một ảnh gốc và các bản giả mạo tạo từ nó phải cùng nằm trong
-tập train hoặc cùng nằm trong tập test.
-
-Script tạo ảnh giả chỉ lấy ảnh donor trong cùng `group_id`. Nhãn `replace_photo`
-hiện mô phỏng dấu vết chỉnh sửa/ghép vùng chân dung; bộ này chưa mô phỏng đầy đủ
-việc tráo ảnh giữa hai danh tính độc lập.
-
-## Cách làm việc với Git
-
-1. Không code trực tiếp trên nhánh `main`.
-2. Mỗi người làm trên nhánh riêng, đặt tên `tv<số>-<việc>`, ví dụ `tv4-glcm`.
-3. Làm xong thì tạo Pull Request, leader xem và merge vào `main`.
-4. Trước khi bắt đầu làm, luôn lấy code mới nhất (`git pull`).
-5. Chỉ sửa trong thư mục phụ trách của mình để tránh xung đột.
+**Chống rò rỉ dữ liệu (Group-aware CV):** Toàn bộ ảnh cùng `group_id` bắt buộc cùng nằm ở tập Train hoặc tập Test trong từng fold (Leave-One-Group-Out CV). Không chia ngẫu nhiên ở mức ảnh (image-level split).
 
 ## Cài đặt môi trường
 
@@ -79,27 +67,51 @@ việc tráo ảnh giữa hai danh tính độc lập.
 pip install numpy opencv-python scikit-image scikit-learn matplotlib pandas
 ```
 
-## Cách chạy
+## Kiểm tra hệ thống & Unit Tests
+
+Pipeline được trang bị bộ kiểm thử tự động toàn diện kiểm tra tính toàn vẹn dữ liệu, trích xuất đặc trưng, chống rò rỉ nhóm, và hiệu chuẩn ngưỡng EER độc lập:
+
+```powershell
+# Chạy script kiểm thử chất lượng và chống rò rỉ
+python scripts/verify_system.py
+
+# Chạy toàn bộ 35 unit & integration tests
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+## Cách chạy quy trình hoàn chỉnh
 
 ```bash
-# Sinh lại 90 mẫu can thiệp tổng hợp từ data/real
+# 1. Sinh lại 90 mẫu can thiệp tổng hợp từ data/real
 python scripts/generate_fake_dataset.py
 
-# Chọn 30 ảnh reprint hợp lệ từ thư mục ảnh giả do nhóm cung cấp,
-# loại ảnh trùng byte với ảnh real và cập nhật data/labels.csv
+# 2. Chọn 30 ảnh reprint hợp lệ từ thư mục ảnh giả, loại trùng byte và cập nhật data/labels.csv
 python scripts/organize_and_add_reprint.py
 
-# Trích xuất đặc trưng từ tập ảnh
-python scripts/build_features.py
+# 3. Trích xuất đặc trưng với chế độ kiểm thực nghiêm ngặt (--strict)
+python scripts/build_features.py --strict
 
-# Đánh giá SVM và Random Forest bằng leave-one-group-out,
-# tạo báo cáo, bảng CSV và biểu đồ trong report/evaluation/
+# 4. Đánh giá toàn diện SVM và Random Forest bằng Leave-One-Group-Out (LOGO) CV,
+#    hiệu chuẩn ngưỡng EER độc lập trên train-only OOF,
+#    phân tích độ nhạy nguồn gốc (Full 165 vs Core Verified 135),
+#    và xuất manifest tái lập cùng báo cáo markdown
 python scripts/run_grouped_evaluation.py --model all
 ```
 
-Kết quả đánh giá được lưu tại `report/evaluation/evaluation_summary.md`. Tập ảnh
-phải được cung cấp riêng vì dữ liệu ảnh không được commit lên Git.
+## Báo cáo & Tài liệu đánh giá
+
+- Báo cáo tổng hợp kết quả thực nghiệm: [`report/evaluation/evaluation_summary.md`](report/evaluation/evaluation_summary.md)
+- Báo cáo chi tiết các sửa đổi hardening và kiểm toán lỗi: [`report/evaluation/hardening_change_report.md`](report/evaluation/hardening_change_report.md)
+- Manifest thông số môi trường & hash tái lập: [`report/evaluation/evaluation_manifest.json`](report/evaluation/evaluation_manifest.json)
+- Bảng kê nguồn gốc từng mẫu dữ liệu (provenance): [`report/evaluation/provenance_manifest.csv`](report/evaluation/provenance_manifest.csv)
+
+## Giới hạn Nghiên cứu (Academic Limitations)
+
+1. **Cỡ mẫu và số nhóm nhỏ**: Dataset gồm 165 ảnh thuộc 5 nhóm thẻ CCCD mẫu công khai. Kết quả phản ánh hiệu năng thử nghiệm của phân tích texture cổ điển, chưa chứng minh được tính tổng quát hóa trên mọi loại phôi thẻ hay camera ngoài đời.
+2. **Cân bằng nhóm reprint**: Nhóm `group_02` hiện chưa có ảnh reprint trong tập chụp lại; `group_04` chỉ có 1 ảnh. 30 mẫu reprint được phân tích độ nhạy riêng biệt (Full 165 vs Core Verified 135).
+3. **Đặc trưng quyết định của SVM**: SVM sử dụng `decision_function` hình học (`score_type="decision_function"`) để triệt tiêu hoàn toàn rò rỉ cross-validation nội bộ từ Platt scaling (`SVC(probability=True)`). Điểm số quyết định không phải xác suất đã hiệu chuẩn.
+4. **Phạm vi mô phỏng**: Ảnh giả `replace_photo` mô phỏng dấu vết chỉnh sửa ghép vùng chân dung trong cùng nhóm thẻ; chưa mô phỏng tráo phôi giữa hai danh tính độc lập.
 
 ## Tiến độ
 
-Xem file phân công `Phan_cong_De_tai_7_eKYC.xlsx` (chia sẻ qua <Google Drive/Sheets>).
+Xem file phân công `Phan_cong_De_tai_7_eKYC.xlsx` (chia sẻ qua Google Drive/Sheets).

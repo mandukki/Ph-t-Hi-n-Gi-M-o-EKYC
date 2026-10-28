@@ -1,0 +1,37 @@
+{
+  "git_commit": "4a1f53cf40d47d0d270fadc589cc976761a90500",
+  "timestamp_utc": "2026-10-28T13:20:00.996694+00:00",
+  "python_version": "3.14.5",
+  "system_platform": "Windows-10-10.0.19044-SP0",
+  "dependencies": {
+    "scikit_learn": "1.9.1",
+    "numpy": "2.5.2",
+    "pandas": "3.0.6"
+  },
+  "input_hashes": {
+    "features_sha256": "05ed610a951cfeeaf280622f129614096e08440148f0f6bbb2ab7d8c75f3e97a",
+    "labels_sha256": "7efe9b576a64c07b0c0b1202a229f60b46924b3d6529a355c2b6b53c5f13142b"
+  },
+  "dataset_summary": {
+    "n_samples": 165,
+    "n_features": 60,
+    "n_groups": 5,
+    "class_distribution": {
+      "fake": 120,
+      "real": 45
+    },
+    "fraud_distribution": {
+      "none": 45,
+      "replace_photo": 30,
+      "edit_text": 30,
+      "splice": 30,
+      "reprint": 30
+    }
+  },
+  "models_evaluated": [
+    "svm",
+    "rf"
+  ],
+  "evaluation_strategy": "Leave-One-Group-Out Outer Cross-Validation",
+  "threshold_strategy": "Inner Grouped Out-of-Fold EER Calibration (Train Only)"
+}

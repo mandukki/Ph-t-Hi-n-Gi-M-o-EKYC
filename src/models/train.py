@@ -183,7 +183,7 @@ def estimate_eer_threshold_oof(
         for train_idx, val_idx in fold_indices:
             clf = TextureFraudClassifier(model_type=model_type, **model_kwargs)
             clf.fit(x[train_idx], y[train_idx])
-            oof_scores[val_idx] = clf.predict_proba(x[val_idx])
+            oof_scores[val_idx] = clf.predict_score(x[val_idx])
             assigned[val_idx] = True
 
         if not assigned.all():
