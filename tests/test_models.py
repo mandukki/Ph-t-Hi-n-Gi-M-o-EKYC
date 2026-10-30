@@ -6,6 +6,8 @@ bảo vệ rò rỉ ngưỡng trong evaluate, và lưu/tải mô hình.
 
 import tempfile
 import unittest
+from unittest.mock import patch
+import warnings
 from pathlib import Path
 import numpy as np
 
@@ -114,6 +116,29 @@ class TestModels(unittest.TestCase):
             self.assertEqual(loaded.score_type, "decision_function")
             loaded_scores = loaded.predict_score(self.x_te)
             np.testing.assert_array_almost_equal(expected_scores, loaded_scores)
+
+    def test_load_legacy_svm_preserves_probability_scale(self):
+        # Original serializer did not store probability=True in model_kwargs.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            pipeline = build_svm_classifier(probability=True).fit(self.x_tr, self.y_tr)
+            state = {
+                "model_type": "svm", "model_kwargs": {}, "threshold": 0.8,
+                "pipeline": pipeline, "is_fitted": True,
+            }
+            with patch("src.models.classifier.load_model", return_value=state):
+                loaded = TextureFraudClassifier.load("legacy.joblib")
+        expected = pipeline.predict_proba(self.x_te)[:, 1]
+        self.assertEqual(loaded.score_type, "probability")
+        self.assertEqual(loaded.threshold, 0.8)
+        np.testing.assert_allclose(loaded.predict_score(self.x_te), expected)
+        np.testing.assert_array_equal(loaded.predict(self.x_te), (expected >= 0.8).astype(int))
+
+    def test_load_legacy_svm_rejects_unknown_scale(self):
+        state = {"model_type": "svm", "model_kwargs": {}, "is_fitted": True}
+        with patch("src.models.classifier.load_model", return_value=state):
+            with self.assertRaisesRegex(ValueError, "thang điểm"):
+                TextureFraudClassifier.load("invalid.joblib")
 
 
 if __name__ == "__main__":

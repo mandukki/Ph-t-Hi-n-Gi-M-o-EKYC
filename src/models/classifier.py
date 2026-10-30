@@ -268,6 +268,8 @@ class TextureFraudClassifier:
     def save(self, filepath: Union[str, Path]) -> str:
         """Lưu trạng thái của classifier."""
         state = {
+            "format_version": 2,
+            "score_type": self.score_type,
             "model_type": self.model_type,
             "threshold": self.threshold,
             "model_kwargs": self.model_kwargs,
@@ -283,10 +285,29 @@ class TextureFraudClassifier:
         if not isinstance(state, dict) or "model_type" not in state:
             raise ValueError("File mô hình không đúng định dạng của TextureFraudClassifier.")
 
+        model_kwargs = dict(state.get("model_kwargs", {}))
+        if state["model_type"] == "svm":
+            pipeline = state.get("pipeline")
+            svm = pipeline.named_steps.get("svm") if pipeline is not None else None
+            stored_score_type = state.get("score_type")
+            if stored_score_type is None:
+                # Older files omitted the default probability=True from kwargs.
+                # Infer the score scale from the serialized estimator, never
+                # reinterpret an existing probability threshold as a margin.
+                if svm is None:
+                    raise ValueError("Không xác định được thang điểm SVM trong file cũ.")
+                stored_score_type = (
+                    "probability" if getattr(svm, "probability", False) == True
+                    else "decision_function"
+                )
+            if stored_score_type not in {"probability", "decision_function"}:
+                raise ValueError("score_type không hợp lệ trong file mô hình.")
+            model_kwargs["probability"] = stored_score_type == "probability"
+
         instance = cls(
             model_type=state["model_type"],
-            threshold=state.get("threshold", 0.0 if state["model_type"] == "svm" else 0.5),
-            **state.get("model_kwargs", {}),
+            threshold=state.get("threshold"),
+            **model_kwargs,
         )
         instance.pipeline = state.get("pipeline")
         instance.is_fitted = state.get("is_fitted", False)

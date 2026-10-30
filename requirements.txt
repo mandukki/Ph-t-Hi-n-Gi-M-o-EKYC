@@ -6,3 +6,4 @@ pandas
 matplotlib
 joblib
 scipy
+pytest>=7

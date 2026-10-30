@@ -4,6 +4,7 @@ theo định dạng 'card_XX_fake_<loại>_YY.jpg' để đồng bộ với đ�
 và tuân theo quy ước mẫu trong data/labels_sample.csv.
 """
 
+import argparse
 import hashlib
 import shutil
 import sys
@@ -24,10 +25,34 @@ from src.features.combine import extract_all_features
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Dựng lại tập reprint bằng gán group heuristic MSE")
+    parser.add_argument(
+        "--force-heuristic-rebuild",
+        action="store_true",
+        help="Cho phép ghi đè nhãn reprint đã được xác minh thủ công.",
+    )
+    args = parser.parse_args()
+
     fake_dir = ROOT_DIR / "data" / "fake"
     reprint_source_dir = ROOT_DIR / "ảnh giả"
     labels_csv_path = ROOT_DIR / "data" / "labels.csv"
     audit_path = ROOT_DIR / "report" / "rejected_duplicate_reprints.csv"
+    provenance_path = ROOT_DIR / "data" / "provenance_manifest.csv"
+
+    if provenance_path.exists() and not args.force_heuristic_rebuild:
+        provenance_df = pd.read_csv(provenance_path, dtype=str)
+        manual_count = int(
+            (
+                (provenance_df["fraud_type"] == "reprint")
+                & (provenance_df["verification_status"] == "manually_verified")
+            ).sum()
+        )
+        if manual_count:
+            raise RuntimeError(
+                f"Đã có {manual_count} ảnh reprint được xác minh group thủ công. "
+                "Dừng để tránh ghi đè nhãn. Chỉ dùng --force-heuristic-rebuild "
+                "khi chủ động muốn dựng lại dataset bằng MSE."
+            )
 
     # Loại nguồn reprint trùng byte với ảnh real hoặc nguồn đã xét trước đó.
     real_hashes = {}

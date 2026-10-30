@@ -3,6 +3,8 @@
 **Dự án**: Phát hiện gian lận giấy tờ cá nhân (eKYC) bằng Texture Analysis (Đề tài 7)  
 **Nhánh kiểm toán**: `tv2-evaluation-hardening-fixes` (tạo từ `tv1-evaluation-hardening`)  
 **Commit cơ sở ban đầu**: `4a1f53cf40d47d0d270fadc589cc976761a90500`  
+
+**Lưu ý cập nhật:** Đây là biên bản ở thời điểm củng cố pipeline (35 tests). Repo hiện có 42 tests; kết quả baseline LBP và định vị vùng tổng hợp nằm tại `report/evaluation/lbp_baseline/summary.md` và `report/evaluation/patch_classifier/summary.md`. Group của 30 ảnh reprint đã được xác minh thủ công sau đợt kiểm toán này; các mô tả heuristic MSE phía dưới được giữ lại như lịch sử thay đổi. Các kết luận về sẵn sàng ứng dụng trong biên bản này không thay thế các giới hạn dữ liệu và định vị trong README hiện tại.
 **Ngày hoàn thành**: 2026-10-28  
 **Kiểm toán viên**: Senior ML Engineer / Python Software Architect / ML Evaluation Auditor  
 
@@ -154,7 +156,7 @@ Hệ thống kiểm thử tự động được xây dựng bằng module chuẩ
    - `test_lbp_flat_image`: Kiểm tra LBP không phát sinh NaN trên ảnh phẳng.
    - `test_glcm_dimensions_and_values`: Kiểm tra GLCM đủ 18 chiều và toàn bộ số hữu hạn.
    - `test_glcm_flat_image`: Kiểm tra GLCM trên ảnh đồng nhất không bị lỗi chia cho 0.
-   - `test_fft_dimensions_and_sum`: Kiểm tra FFT đủ 32 chiều (16 vòng tròn bán kính + 16 dải góc), tổng năng lượng bằng 1.0.
+   - `test_fft_dimensions_and_sum`: Kiểm tra FFT đủ 32 chiều (32 vòng bán kính), tổng năng lượng bằng 1.0.
    - `test_fft_flat_image`: Kiểm tra FFT xử lý biên an toàn khi năng lượng tần số cao bằng 0.
    - `test_extract_all_features_concatenation`: Kiểm tra vector ghép chuẩn xác 60 chiều với đúng thứ tự [LBP, GLCM, FFT].
 

@@ -1,0 +1,44 @@
+{
+  "n_synthetic": 90,
+  "top1_hit": 0.34444444444444444,
+  "top3_hit": 0.5222222222222223,
+  "random_top1_expected": 0.19444444444444445,
+  "random_top3_expected": 0.4817468159859464,
+  "by_type": {
+    "edit_text": {
+      "top1_hit": 0.1,
+      "top3_hit": 0.4
+    },
+    "replace_photo": {
+      "top1_hit": 0.5666666666666667,
+      "top3_hit": 0.7666666666666667
+    },
+    "splice": {
+      "top1_hit": 0.36666666666666664,
+      "top3_hit": 0.4
+    }
+  },
+  "by_group": {
+    "group_01": {
+      "top1_hit": 0.2777777777777778,
+      "top3_hit": 0.5555555555555556
+    },
+    "group_02": {
+      "top1_hit": 0.2777777777777778,
+      "top3_hit": 0.5
+    },
+    "group_03": {
+      "top1_hit": 0.3333333333333333,
+      "top3_hit": 0.4444444444444444
+    },
+    "group_04": {
+      "top1_hit": 0.3888888888888889,
+      "top3_hit": 0.6111111111111112
+    },
+    "group_05": {
+      "top1_hit": 0.4444444444444444,
+      "top3_hit": 0.5
+    }
+  },
+  "caveat": "Approximate boxes from generator coordinates; perspective warp not transferred. Diagnostic only, not IoU/Dice."
+}

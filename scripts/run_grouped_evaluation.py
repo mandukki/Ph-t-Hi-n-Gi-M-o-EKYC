@@ -9,8 +9,8 @@
 2. Đánh giá Baseline công bằng:
    - Bổ sung fold-level majority baseline (học đa số từ outer train).
 3. Phân tích độ nhạy (Sensitivity Analysis):
-   - Đánh giá trên toàn bộ 165 mẫu (kèm 30 ảnh reprint heuristic).
-   - Đánh giá trên tập lõi đã kiểm thực nguồn gốc 135 mẫu (loại bỏ ảnh reprint chưa kiểm chứng).
+   - Đánh giá trên toàn bộ 165 mẫu (kèm 30 ảnh reprint đã xác minh group thủ công).
+   - Đánh giá trên tập digital-only 135 mẫu để định lượng ảnh hưởng của kiểu reprint.
 4. Kiểm toán nguồn gốc (Provenance Check):
    - Quét mã băm SHA-256 đối chiếu và kiểm tra trạng thái xác thực trong provenance manifest.
 5. Báo cáo & Manifest có thể tái lập 100%:
@@ -76,6 +76,52 @@ def get_git_commit_hash() -> str:
         return res.stdout.strip()
     except Exception:
         return "unversioned_or_git_unavailable"
+
+
+def collect_source_identity(root: Path = ROOT_DIR) -> Dict[str, Any]:
+    """Identify the source actually executed, including uncommitted files."""
+    source_files = sorted(
+        [*root.glob("src/**/*.py"), *root.glob("scripts/**/*.py"), root / "requirements.txt"]
+    )
+    hashes = {
+        path.relative_to(root).as_posix(): sha256_file(path)
+        for path in source_files if path.is_file()
+    }
+    digest = hashlib.sha256(
+        json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root, capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        dirty = bool(status)
+    except (OSError, subprocess.CalledProcessError):
+        status, dirty = [], None
+    return {
+        "git_dirty_at_start": dirty,
+        "git_status_at_start": status,
+        "source_tree_sha256": digest,
+        "source_files_sha256": hashes,
+    }
+
+
+def validate_image_hashes(labels_df: pd.DataFrame, root: Path = ROOT_DIR) -> Dict[str, str]:
+    """Reject duplicate image content even when file names/labels differ."""
+    seen: Dict[str, str] = {}
+    image_hashes = {}
+    for row in labels_df.itertuples(index=False):
+        path = (root / row.path).resolve()
+        path.relative_to(root.resolve())
+        digest = sha256_file(path)
+        if digest in seen:
+            raise ValueError(
+                f"Ảnh trùng byte: {seen[digest]} và {row.path}. "
+                "Hãy sửa dữ liệu trước khi huấn luyện/đánh giá."
+            )
+        seen[digest] = row.path
+        image_hashes[row.path] = digest
+    return image_hashes
 
 
 def compute_binary_metrics(
@@ -383,7 +429,7 @@ def save_evaluation_plots(model_type: str, result: Dict[str, Any], output_dir: P
 
     fig.tight_layout()
     fig.savefig(output_dir / f"{model_type}_fraud_type_detection.png", bbox_inches="tight")
-    if model_type == "svm":
+    if model_type == "svm" and output_dir == (ROOT_DIR / "report" / "evaluation").resolve():
         fig.savefig(ROOT_DIR / "report" / "fraud_evaluation.png", bbox_inches="tight")
     plt.close(fig)
 
@@ -401,6 +447,7 @@ def write_comprehensive_summary(
     labels_path: Path,
     output_dir: Path,
     sensitivity_results: Optional[Dict[str, Any]] = None,
+    source_identity: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Tạo báo cáo tổng kết chi tiết đầy đủ chỉ số và phân tích độ nhạy."""
     counts_label = labels_df["label"].value_counts().to_dict()
@@ -417,8 +464,14 @@ def write_comprehensive_summary(
     lines = [
         "# Báo cáo Đánh giá Chuyên sâu eKYC Texture Fraud Detection",
         "",
-        f"**Ngày cập nhật**: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  ",
-        f"**Commit SHA**: `{get_git_commit_hash()[:10]}`  ",
+        f"**Ngày cập nhật**: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        "",
+        f"**Commit SHA**: `{get_git_commit_hash()[:10]}`",
+        "",
+        f"**Source dirty lúc bắt đầu**: `{(source_identity or {}).get('git_dirty_at_start', 'unknown')}`",
+        "",
+        f"**SHA-256 mã nguồn thực thi**: `{(source_identity or {}).get('source_tree_sha256', 'unknown')}`",
+        "",
         f"**Phương pháp**: Leave-One-Group-Out (LOGO) Cross-Validation với hiệu chuẩn ngưỡng EER OOF độc lập từ tập huấn luyện.",
         "",
         "---",
@@ -510,9 +563,9 @@ def write_comprehensive_summary(
         lines.extend([
             "---",
             "",
-            "## 4. Phân tích Độ nhạy Nguồn gốc (Provenance Sensitivity Analysis)",
+            "## 4. Phân tích Độ nhạy với Ảnh Reprint (Reprint Sensitivity Analysis)",
             "",
-            "Do 30 ảnh trong nhóm `reprint` được gán nhóm theo template gần nhất (MSE), hệ thống thực hiện kiểm thử độ nhạy bằng cách so sánh hiệu năng giữa **Tập Toàn bộ (165 mẫu)** và **Tập Lõi Đã Kiểm thực (Core Verified - 135 mẫu)** (loại bỏ 30 mẫu reprint gán bằng heuristic):",
+            "Group của 30 ảnh `reprint` đã được xác minh thủ công theo thông tin hiển thị trên thẻ. Hệ thống vẫn so sánh **Tập Toàn bộ (165 mẫu)** với **Tập Digital-only (135 mẫu)** (loại 30 ảnh reprint) để định lượng ảnh hưởng của kiểu gian lận vật lý này:",
             "",
             "| Mô hình | Tập kiểm định | Số mẫu | Accuracy (Macro Mean) | Balanced Acc (Mean) | F1 Fake (Pooled) | Specificity Real (Pooled) |",
             "|---|---|---:|---:|---:|---:|---:|",
@@ -529,7 +582,7 @@ def write_comprehensive_summary(
                     f"| {format_rate(full_m['pooled_oof_metrics']['specificity_real'])} |"
                 )
                 lines.append(
-                    f"| {m_name.upper()} | **Tập lõi (Core Verified 135)** | 135 "
+                    f"| {m_name.upper()} | **Digital-only (135)** | 135 "
                     f"| {format_rate(core_m['fold_mean_std']['accuracy']['mean'])} "
                     f"| {format_rate(core_m['fold_mean_std']['balanced_accuracy']['mean'])} "
                     f"| {format_rate(core_m['pooled_oof_metrics']['f1_fake'])} "
@@ -543,7 +596,7 @@ def write_comprehensive_summary(
         "## 5. Giới hạn Nghiên cứu (Academic Limitations)",
         "",
         "1. **Cỡ mẫu và số nhóm nhỏ**: Dataset hiện có 5 nhóm cá nhân. Kết quả phản ánh hiệu năng thử nghiệm của thuật toán texture cổ điển trên tập này, chưa chứng minh được tính tổng quát hóa trên mọi loại phôi thẻ hay camera ngoài đời.",
-        "2. **Cân bằng nhóm reprint**: Nhóm `group_02` hiện chưa có ảnh reprint trong tập chụp lại; `group_04` chỉ có 1 ảnh.",
+        "2. **Cân bằng nhóm reprint**: 30 ảnh reprint đã được xác minh thủ công nhưng phân bố chưa đều: group_01=7, group_02=2, group_03=9, group_04=3, group_05=9.",
         "3. **Đặc trưng quyết định của SVM**: SVM sử dụng `decision_function` hình học để triệt tiêu hoàn toàn rò rỉ cross-validation nội bộ. Điểm số quyết định không phải xác suất đã hiệu chuẩn (calibrated probability).",
         "4. **Chống rò rỉ dữ liệu**: 4 file reprint trùng byte với ảnh thật đã được phát hiện qua mã băm SHA-256 và loại bỏ hoàn toàn.",
         "",
@@ -559,6 +612,36 @@ def write_comprehensive_summary(
     summary_file = output_dir / "evaluation_summary.md"
     summary_file.write_text("\n".join(lines), encoding="utf-8")
     print(f"  Đã ghi báo cáo tổng hợp: {summary_file}")
+    # Both documents use the same computed result objects, not copied metrics.
+    brief = [
+        "# Tóm tắt dự án cho báo cáo", "",
+        f"Dữ liệu: {n} mẫu, {labels_df['group_id'].nunique()} group nguồn. "
+        "Đánh giá leave-one-group-out; ngưỡng học từ grouped OOF trên train.", "",
+        "| Model | Accuracy group mean ± SD | Balanced accuracy group mean | Recall fake pooled | Specificity real pooled |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for res in results:
+        fold, pooled = res["fold_mean_std"], res["pooled_oof_metrics"]
+        brief.append(
+            f"| {res['model_type'].upper()} "
+            f"| {format_rate(fold['accuracy']['mean'])} ± {format_rate(fold['accuracy']['std'])} "
+            f"| {format_rate(fold['balanced_accuracy']['mean'])} "
+            f"| {format_rate(pooled['recall_fake'])} | {format_rate(pooled['specificity_real'])} |"
+        )
+    brief.extend([
+        "", f"Baseline accuracy luôn đoán lớp đa số: {format_rate(global_majority_acc)}.", "",
+        "Chỉ có năm group nguồn; kết quả phản ánh prototype trên bộ dữ liệu hiện tại. "
+        "Group của 30 ảnh reprint đã được xác minh thủ công; phân bố giữa các group chưa đều. "
+        "Donor replace_photo cùng group, chưa mô phỏng đầy đủ tráo ảnh giữa hai danh tính.", "",
+        f"Source SHA-256: `{(source_identity or {}).get('source_tree_sha256', 'unknown')}`.", "",
+    ])
+    brief_path = output_dir / "review_brief.md"
+    brief_path.write_text("\n".join(brief), encoding="utf-8")
+    if output_dir == (ROOT_DIR / "report" / "evaluation").resolve():
+        (ROOT_DIR / "report" / "REPORT_BRIEF_FOR_CLAUDE.md").write_text(
+            "\n".join(brief) + "\nChi tiết: [báo cáo đánh giá](evaluation/evaluation_summary.md).\n",
+            encoding="utf-8",
+        )
 
 
 def main() -> None:
@@ -577,10 +660,13 @@ def main() -> None:
     features_path = (ROOT_DIR / args.features).resolve()
     labels_path = (ROOT_DIR / args.labels).resolve()
     output_dir = (ROOT_DIR / args.output_dir).resolve()
+    source_identity = collect_source_identity(ROOT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=== 1. Kiểm thực Dữ liệu & Tính toàn vẹn ===")
     labels_df = pd.read_csv(labels_path, dtype=str)
     labels_df = validate_metadata_df(labels_df, project_root=ROOT_DIR)
+    image_hashes = validate_image_hashes(labels_df, ROOT_DIR)
 
     with np.load(features_path, allow_pickle=False) as npz:
         x = npz["X"]
@@ -589,18 +675,36 @@ def main() -> None:
         fraud_types = npz["fraud_types"].astype(str)
 
     validate_feature_bundle(x, y, groups, fraud_types, labels_df=labels_df)
-    print(f"  Đã kiểm thực thành công {len(labels_df)} mẫu. 0 lỗi rò rỉ metadata.")
+    print(f"  Đã kiểm thực {len(labels_df)} mẫu; không có ảnh trùng byte.")
 
     # Kiểm tra provenance manifest
     prov_path = ROOT_DIR / "data" / "provenance_manifest.csv"
     if prov_path.exists():
-        prov_df = pd.read_csv(prov_path)
+        prov_df = pd.read_csv(prov_path, dtype=str)
+        provenance_key_columns = ["path", "label", "fraud_type", "group_id"]
+        missing_provenance_columns = set(provenance_key_columns + ["verification_status"]) - set(prov_df.columns)
+        if missing_provenance_columns:
+            raise ValueError(
+                f"Provenance manifest thiếu cột: {sorted(missing_provenance_columns)}"
+            )
+        label_keys = set(map(tuple, labels_df[provenance_key_columns].astype(str).to_numpy()))
+        provenance_keys = set(map(tuple, prov_df[provenance_key_columns].astype(str).to_numpy()))
+        if len(prov_df) != len(labels_df) or label_keys != provenance_keys:
+            raise ValueError(
+                "data/provenance_manifest.csv không khớp path/label/fraud_type/group_id "
+                "với data/labels.csv. Hãy đồng bộ metadata trước khi đánh giá."
+            )
         unverified_cnt = int((prov_df["verification_status"] == "heuristic_mse_match_unverified").sum())
+        manual_reprint_cnt = int(
+            ((prov_df["fraud_type"] == "reprint") & (prov_df["verification_status"] == "manually_verified")).sum()
+        )
         if unverified_cnt > 0:
             print(
                 f"[CẢNH BÁO KIỂM TOÁN] Có {unverified_cnt} mẫu reprint mang nhãn 'heuristic_mse_match_unverified'. "
                 "Cần xem xét kết quả phân tích độ nhạy tương ứng."
             )
+        if manual_reprint_cnt > 0:
+            print(f"  Đã xác minh thủ công group cho {manual_reprint_cnt} ảnh reprint.")
 
     models_to_run = ["svm", "rf"] if args.model == "all" else [args.model]
     all_results = []
@@ -639,7 +743,7 @@ def main() -> None:
     # 4. Phân tích độ nhạy (Sensitivity Analysis trên tập Core 135 mẫu)
     sensitivity_results = {}
     if not args.skip_sensitivity and "reprint" in fraud_types:
-        print("\n=== 4. Phân tích Độ nhạy Nguồn gốc (Core Verified Subset - 135 mẫu) ===")
+        print("\n=== 4. Phân tích Độ nhạy Reprint (Digital-only Subset - 135 mẫu) ===")
         core_mask = (fraud_types != "reprint")
         x_core = x[core_mask]
         y_core = y[core_mask]
@@ -660,6 +764,9 @@ def main() -> None:
     print("\n=== 5. Xuất Evaluation Manifest ===")
     manifest = {
         "git_commit": get_git_commit_hash(),
+        **source_identity,
+        "image_files_sha256": image_hashes,
+        "run_options": vars(args),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "python_version": platform.python_version(),
         "system_platform": platform.platform(),
@@ -697,6 +804,7 @@ def main() -> None:
         labels_path,
         output_dir,
         sensitivity_results=sensitivity_results,
+        source_identity=source_identity,
     )
     print("\n[OK] Đánh giá và báo cáo hoàn tất thành công.")
 

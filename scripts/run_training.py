@@ -177,7 +177,7 @@ def main() -> None:
     print(f"  Accuracy       : {test_metrics['accuracy']:.4f}")
     print(f"  AUC-ROC        : {test_metrics['auc_roc']:.4f}")
     print(f"  EER (Test)     : {test_metrics['eer']:.4f}")
-    print(f"  EER Thresh(Test: {test_metrics['eer_threshold']:.4f}")
+    print(f"  EER Thresh (Test): {test_metrics['eer_threshold']:.4f}")
     print(f"  Eval Threshold : {test_metrics['eval_threshold']:.4f} (calibrated từ train set)")
     print(f"  Precision      : {test_metrics['precision']:.4f}")
     print(f"  Recall         : {test_metrics['recall']:.4f}")
