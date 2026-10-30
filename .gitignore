@@ -219,6 +219,7 @@ __marimo__/
 data/real/*
 data/fake/*
 data/processed/*
+data/labels.csv
 !data/**/.gitkeep
 *.npy
 *.pkl
@@ -226,4 +227,8 @@ data/processed/*
 
 data/_tmp_uploaded_zip/
 report/detailed_audit/
+Ảnh Thật/
+ảnh giả/
+Ảnh Giả/
+/*.zip
 

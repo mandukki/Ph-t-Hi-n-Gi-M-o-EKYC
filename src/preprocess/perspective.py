@@ -133,7 +133,7 @@ def auto_crop_card(image: np.ndarray) -> Optional[np.ndarray]:
         for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:10]:
             area_ratio = cv2.contourArea(contour) / small_area
             # Contour gần bằng cả khung thường là nền do phân ngưỡng Otsu.
-            if not 0.10 <= area_ratio < 0.95:
+            if not 0.07 <= area_ratio < 0.95:
                 continue
 
             perimeter = cv2.arcLength(contour, True)

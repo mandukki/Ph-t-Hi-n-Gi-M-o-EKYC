@@ -115,7 +115,7 @@ def test_3_eer_threshold_calibration():
     clf.fit(x_tr, y_tr)
     
     # Lấy ngưỡng EER từ TRAIN
-    train_scores = clf.predict_proba(x_tr)
+    train_scores = clf.predict_score(x_tr)
     _, train_thresh = calc_eer(y_tr, train_scores)
     clf.threshold = float(train_thresh)
     

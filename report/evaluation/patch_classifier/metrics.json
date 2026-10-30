@@ -1,0 +1,22 @@
+{
+  "n_synthetic": 90,
+  "top1_hit": 0.7,
+  "top3_hit": 0.8444444444444444,
+  "random_top1_expected": 0.19444444444444445,
+  "random_top3_expected": 0.4817468159859464,
+  "by_type": {
+    "edit_text": {
+      "top1_hit": 0.8666666666666667,
+      "top3_hit": 0.9666666666666667
+    },
+    "replace_photo": {
+      "top1_hit": 0.6666666666666666,
+      "top3_hit": 0.8
+    },
+    "splice": {
+      "top1_hit": 0.5666666666666667,
+      "top3_hit": 0.7666666666666667
+    }
+  },
+  "caveat": "Weak boxes from generator; grid labels approximate after perspective crop."
+}
